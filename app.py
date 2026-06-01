@@ -11,7 +11,7 @@ import io
 
 # ============================================================
 # 國中英文單字智慧複習系統
-# app_v11.py
+# app_v12.py
 #
 # 本版方向：
 # 回到 SQLite + 下載備份，不使用 Google Sheets。
@@ -26,6 +26,7 @@ import io
 # 7. 簡化記憶曲線
 # 8. 今日複習、未學單字、學習中、已掌握
 # 9. 依帳號下載 / 上傳 CSV 備份，並可還原完整 progress.db
+# 10. 自動偵測舊版 progress.db，舊資料會先轉到女兒帳號
 # ============================================================
 
 
@@ -287,10 +288,20 @@ def get_conn():
 
 
 def init_db():
-    """建立 users 與 progress 資料表。"""
+    """
+    建立 users 與 progress 資料表。
+
+    重要：
+    如果你之前已經用過舊版 progress.db，
+    舊版 progress 資料表可能沒有 user_id 欄位。
+    這裡會自動偵測舊版資料表，並把舊資料轉移到 daughter 帳號。
+    """
     conn = get_conn()
     cur = conn.cursor()
 
+    # -------------------------
+    # 1. 建立 users 資料表
+    # -------------------------
     cur.execute(
         """
         CREATE TABLE IF NOT EXISTS users (
@@ -298,29 +309,6 @@ def init_db():
             user_name TEXT NOT NULL,
             role TEXT DEFAULT 'learner',
             created_at TEXT
-        )
-        """
-    )
-
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS progress (
-            user_id TEXT NOT NULL,
-            word_id TEXT NOT NULL,
-            word TEXT,
-            grade TEXT,
-            semester TEXT,
-            lesson TEXT,
-            status TEXT DEFAULT '未學',
-            mastery INTEGER DEFAULT 0,
-            review_count INTEGER DEFAULT 0,
-            correct_count INTEGER DEFAULT 0,
-            wrong_count INTEGER DEFAULT 0,
-            streak_correct INTEGER DEFAULT 0,
-            last_review TEXT,
-            next_review TEXT,
-            updated_at TEXT,
-            PRIMARY KEY (user_id, word_id)
         )
         """
     )
@@ -336,9 +324,109 @@ def init_db():
             (user_id, user_name, role, now)
         )
 
+    # -------------------------
+    # 2. 檢查 progress 是否已存在
+    # -------------------------
+    cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='progress'")
+    progress_exists = cur.fetchone() is not None
+
+    if progress_exists:
+        cur.execute("PRAGMA table_info(progress)")
+        existing_columns = [row[1] for row in cur.fetchall()]
+
+        # 舊版 progress 沒有 user_id，需要遷移
+        if "user_id" not in existing_columns:
+            backup_table = f"progress_old_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+            cur.execute(f"ALTER TABLE progress RENAME TO {backup_table}")
+
+            # 建立新版 progress
+            cur.execute(
+                """
+                CREATE TABLE progress (
+                    user_id TEXT NOT NULL,
+                    word_id TEXT NOT NULL,
+                    word TEXT,
+                    grade TEXT,
+                    semester TEXT,
+                    lesson TEXT,
+                    status TEXT DEFAULT '未學',
+                    mastery INTEGER DEFAULT 0,
+                    review_count INTEGER DEFAULT 0,
+                    correct_count INTEGER DEFAULT 0,
+                    wrong_count INTEGER DEFAULT 0,
+                    streak_correct INTEGER DEFAULT 0,
+                    last_review TEXT,
+                    next_review TEXT,
+                    updated_at TEXT,
+                    PRIMARY KEY (user_id, word_id)
+                )
+                """
+            )
+
+            # 把舊版資料轉到 daughter 帳號
+            # 舊版欄位若存在就搬，沒有就補預設值。
+            cur.execute(f"PRAGMA table_info({backup_table})")
+            old_columns = [row[1] for row in cur.fetchall()]
+
+            def old_col(name, default_sql):
+                return name if name in old_columns else default_sql
+
+            cur.execute(
+                f"""
+                INSERT OR IGNORE INTO progress
+                (user_id, word_id, word, grade, semester, lesson, status, mastery,
+                 review_count, correct_count, wrong_count, streak_correct,
+                 last_review, next_review, updated_at)
+                SELECT
+                    'daughter' AS user_id,
+                    {old_col('word_id', "''")} AS word_id,
+                    {old_col('word', "''")} AS word,
+                    {old_col('grade', "''")} AS grade,
+                    {old_col('semester', "''")} AS semester,
+                    {old_col('lesson', "''")} AS lesson,
+                    {old_col('status', "'未學'")} AS status,
+                    {old_col('mastery', "0")} AS mastery,
+                    {old_col('review_count', "0")} AS review_count,
+                    {old_col('correct_count', "0")} AS correct_count,
+                    {old_col('wrong_count', "0")} AS wrong_count,
+                    {old_col('streak_correct', "0")} AS streak_correct,
+                    {old_col('last_review', "NULL")} AS last_review,
+                    {old_col('next_review', "NULL")} AS next_review,
+                    {old_col('updated_at', "''")} AS updated_at
+                FROM {backup_table}
+                WHERE {old_col('word_id', "''")} != ''
+                """
+            )
+
+        # 如果有 user_id，就視為新版資料表，不動它。
+
+    else:
+        # progress 不存在，直接建立新版資料表
+        cur.execute(
+            """
+            CREATE TABLE progress (
+                user_id TEXT NOT NULL,
+                word_id TEXT NOT NULL,
+                word TEXT,
+                grade TEXT,
+                semester TEXT,
+                lesson TEXT,
+                status TEXT DEFAULT '未學',
+                mastery INTEGER DEFAULT 0,
+                review_count INTEGER DEFAULT 0,
+                correct_count INTEGER DEFAULT 0,
+                wrong_count INTEGER DEFAULT 0,
+                streak_correct INTEGER DEFAULT 0,
+                last_review TEXT,
+                next_review TEXT,
+                updated_at TEXT,
+                PRIMARY KEY (user_id, word_id)
+            )
+            """
+        )
+
     conn.commit()
     conn.close()
-
 
 def ensure_progress_for_words(df: pd.DataFrame):
     """
@@ -808,7 +896,7 @@ st.sidebar.write(f"已掌握：**{mastered}**")
 
 st.markdown('<div class="main-title">📘 國中英文單字複習</div>', unsafe_allow_html=True)
 st.markdown(
-    '<div class="small-caption">第二階段：SQLite 學習紀錄 + 多使用者 + 分帳號上傳下載備份</div>',
+    '<div class="small-caption">第二階段：SQLite 學習紀錄 + 多使用者 + 分帳號上傳下載備份 + 舊資料庫自動遷移</div>',
     unsafe_allow_html=True
 )
 
