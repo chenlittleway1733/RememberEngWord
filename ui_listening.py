@@ -29,6 +29,7 @@ def reset_listening_session():
     st.session_state.listening_count_done = 0
     st.session_state.listening_count_correct = 0
     st.session_state.listening_finished = False
+    st.session_state.last_listening_autoplay_key = ""
 
 
 def get_listening_target_count() -> int:
@@ -84,12 +85,17 @@ def prepare_new_listening_question(source_df: pd.DataFrame):
     row = pool.sample(1).iloc[0]
     options = make_listening_options(row, pool)
 
+    # question_id 用來讓每一題的自動播放狀態獨立，
+    # 避免換下一題時瀏覽器還播放上一題的音檔。
+    question_id = f"{safe_str(row.get('word_id', ''))}_{random.randint(100000, 999999)}"
+
     return {
         "quiz_type": "聽力測驗：聽單字選英文",
         "question": "請聽發音，選出正確的英文單字。",
         "correct_answer": safe_str(row.get("word", "")),
         "options": options,
         "word_row": row.to_dict(),
+        "question_id": question_id,
     }
 
 
@@ -235,7 +241,9 @@ def render_listening_page(merged_df: pd.DataFrame, user_id: str, user_name: str,
     st.write("請先聽發音，再選出正確英文。")
 
     # 自動播放每題一次
-    autoplay_key = f"{user_id}|{row.get('word_id', '')}|{st.session_state.listening_count_done}"
+    question_id = safe_str(current.get("question_id", row.get("word_id", "")))
+    autoplay_key = f"{user_id}|{question_id}|{st.session_state.listening_count_done}"
+
     if st.session_state.get("last_listening_autoplay_key", "") != autoplay_key:
         audio_path = get_audio_file(correct_answer)
         autoplay_audio(audio_path)
@@ -266,6 +274,7 @@ def render_listening_page(merged_df: pd.DataFrame, user_id: str, user_name: str,
         ):
             st.session_state.listening_current = prepare_new_listening_question(source_df)
             st.session_state.listening_answered = False
+            st.session_state.last_listening_autoplay_key = ""
             st.rerun()
 
     if submit and not st.session_state.listening_answered:
@@ -303,6 +312,7 @@ def render_listening_page(merged_df: pd.DataFrame, user_id: str, user_name: str,
             if st.button("下一題", use_container_width=True, key=f"next_listening_{st.session_state.listening_count_done}"):
                 st.session_state.listening_current = prepare_new_listening_question(source_df)
                 st.session_state.listening_answered = False
+                st.session_state.last_listening_autoplay_key = ""
                 st.rerun()
 
     st.divider()

@@ -80,3 +80,9 @@
 - 聽力測驗支援聽單字選英文
 - 聽力測驗支援 5 / 10 / 20 / 任意題
 - 聽力測驗答題結果會寫入 quiz_log，並更新 progress
+
+
+修正：聽力測驗下一題播放上一題音檔
+- 每題新增 question_id
+- 下一題 / 跳過時會清除 last_listening_autoplay_key
+- 自動播放會依 question_id 判斷，避免沿用上一題音檔
