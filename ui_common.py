@@ -162,62 +162,50 @@ def render_sidebar_user_selector(users_df: pd.DataFrame):
 
 
 def render_sidebar_quick_backup(user_id: str, user_name: str):
-    """側邊欄：快速下載 / 上傳目前使用者紀錄。"""
+    """
+    側邊欄：快速備份 / 還原目前使用者紀錄。
+
+    設計原則：
+    1. 一般使用者只需要用「完整備份 JSON」。
+    2. 完整備份 JSON 會同時包含：
+       - progress 學習紀錄
+       - quiz_log 測驗紀錄
+    3. 分開下載 / 上傳 progress、quiz_log 放到「進階備份」裡，避免畫面混亂。
+    """
     st.sidebar.markdown("### 💾 快速備份")
+
     try:
-        sidebar_selected_progress = load_progress(user_id)
+        # ----------------------------------------------------
+        # 主要功能：單一使用者完整備份 JSON
+        # ----------------------------------------------------
+        combined_backup = export_user_combined_backup(user_id, user_name)
 
-        # 下載目前使用者的學習進度 progress
-        sidebar_csv_bytes = sidebar_selected_progress.to_csv(index=False).encode("utf-8-sig")
-        st.sidebar.download_button(
-            label=f"⬇️ 下載{user_name}學習紀錄",
-            data=sidebar_csv_bytes,
-            file_name=f"{user_id}_progress_backup.csv",
-            mime="text/csv",
-            key=f"sidebar_download_{user_id}",
-            use_container_width=True
-        )
-
-        # 下載目前使用者的測驗紀錄 quiz_log
-        sidebar_quiz_log = load_quiz_log(user_id)
-        sidebar_quiz_bytes = sidebar_quiz_log.to_csv(index=False).encode("utf-8-sig")
-        st.sidebar.download_button(
-            label=f"⬇️ 下載{user_name}測驗紀錄",
-            data=sidebar_quiz_bytes,
-            file_name=f"{user_id}_quiz_log_backup.csv",
-            mime="text/csv",
-            key=f"sidebar_download_quiz_log_{user_id}",
-            use_container_width=True
-        )
-
-        # 單一使用者完整備份：同時包含 progress 與 quiz_log
-        sidebar_combined_backup = export_user_combined_backup(user_id, user_name)
         st.sidebar.download_button(
             label=f"⬇️ 下載{user_name}完整備份",
-            data=sidebar_combined_backup,
+            data=combined_backup,
             file_name=f"{user_id}_full_backup.json",
             mime="application/json",
-            key=f"sidebar_download_combined_{user_id}",
+            key=f"sidebar_download_full_backup_{user_id}",
             use_container_width=True
         )
 
         with st.sidebar.expander(f"⬆️ 上傳{user_name}完整備份"):
-            st.caption("此功能會同時覆蓋目前使用者的學習紀錄與測驗紀錄。")
+            st.caption("完整備份會同時覆蓋目前使用者的學習紀錄與測驗紀錄。")
 
-            sidebar_uploaded_combined = st.file_uploader(
+            uploaded_combined = st.file_uploader(
                 "選擇完整備份 JSON",
                 type=["json"],
-                key=f"sidebar_upload_combined_{user_id}"
+                key=f"sidebar_upload_full_backup_{user_id}"
             )
 
-            sidebar_confirm_combined = st.checkbox(
+            confirm_combined = st.checkbox(
                 f"確認覆蓋{user_name}完整紀錄",
-                key=f"sidebar_confirm_combined_{user_id}"
+                key=f"sidebar_confirm_full_backup_{user_id}"
             )
 
-            if sidebar_uploaded_combined is not None:
+            if uploaded_combined is not None:
                 try:
-                    backup_data = json.load(sidebar_uploaded_combined)
+                    backup_data = json.load(uploaded_combined)
 
                     st.write("備份檔資訊：")
                     st.write(f"匯出時間：{backup_data.get('exported_at', '')}")
@@ -227,8 +215,8 @@ def render_sidebar_quick_backup(user_id: str, user_name: str):
 
                     if st.button(
                         "開始覆蓋匯入完整備份",
-                        disabled=not sidebar_confirm_combined,
-                        key=f"sidebar_start_combined_import_{user_id}",
+                        disabled=not confirm_combined,
+                        key=f"sidebar_start_full_backup_import_{user_id}",
                         use_container_width=True
                     ):
                         ok, msg = import_user_combined_backup(user_id, backup_data)
@@ -241,11 +229,40 @@ def render_sidebar_quick_backup(user_id: str, user_name: str):
                 except Exception as e:
                     st.error(f"讀取完整備份 JSON 失敗：{e}")
 
-        with st.sidebar.expander(f"⬆️ 上傳{user_name}學習紀錄"):
-            st.caption("上傳 CSV 後，只會更新目前選定帳號。")
+        # ----------------------------------------------------
+        # 進階功能：分開處理 progress 與 quiz_log
+        # ----------------------------------------------------
+        with st.sidebar.expander("進階備份：分開下載 / 上傳"):
+            st.caption("通常不用使用這裡；一般建議使用上方完整備份。")
 
+            sidebar_selected_progress = load_progress(user_id)
+            sidebar_quiz_log = load_quiz_log(user_id)
+
+            sidebar_csv_bytes = sidebar_selected_progress.to_csv(index=False).encode("utf-8-sig")
+            st.download_button(
+                label=f"⬇️ 下載{user_name}學習紀錄 CSV",
+                data=sidebar_csv_bytes,
+                file_name=f"{user_id}_progress_backup.csv",
+                mime="text/csv",
+                key=f"sidebar_download_progress_csv_{user_id}",
+                use_container_width=True
+            )
+
+            sidebar_quiz_bytes = sidebar_quiz_log.to_csv(index=False).encode("utf-8-sig")
+            st.download_button(
+                label=f"⬇️ 下載{user_name}測驗紀錄 CSV",
+                data=sidebar_quiz_bytes,
+                file_name=f"{user_id}_quiz_log_backup.csv",
+                mime="text/csv",
+                key=f"sidebar_download_quiz_log_csv_{user_id}",
+                use_container_width=True
+            )
+
+            st.divider()
+
+            st.markdown("**上傳學習紀錄 CSV**")
             sidebar_import_mode_label = st.radio(
-                "匯入方式",
+                "學習紀錄匯入方式",
                 ["覆蓋", "合併"],
                 index=0,
                 horizontal=True,
@@ -254,14 +271,14 @@ def render_sidebar_quick_backup(user_id: str, user_name: str):
             sidebar_import_mode = "replace" if sidebar_import_mode_label == "覆蓋" else "merge"
 
             sidebar_uploaded_csv = st.file_uploader(
-                "選擇 CSV 備份檔",
+                "選擇 progress CSV",
                 type=["csv"],
-                key=f"sidebar_upload_csv_{user_id}"
+                key=f"sidebar_upload_progress_csv_{user_id}"
             )
 
             sidebar_confirm_import = st.checkbox(
-                f"確認匯入到{user_name}",
-                key=f"sidebar_confirm_import_{user_id}"
+                f"確認匯入{user_name}學習紀錄",
+                key=f"sidebar_confirm_progress_import_{user_id}"
             )
 
             if sidebar_uploaded_csv is not None:
@@ -271,9 +288,9 @@ def render_sidebar_quick_backup(user_id: str, user_name: str):
                     st.dataframe(sidebar_preview_df.head(3), use_container_width=True, hide_index=True)
 
                     if st.button(
-                        "開始匯入",
+                        "開始匯入學習紀錄",
                         disabled=not sidebar_confirm_import,
-                        key=f"sidebar_start_import_{user_id}",
+                        key=f"sidebar_start_progress_import_{user_id}",
                         use_container_width=True
                     ):
                         ok, msg = import_user_progress_from_csv(
@@ -287,15 +304,17 @@ def render_sidebar_quick_backup(user_id: str, user_name: str):
                         else:
                             st.error(msg)
                 except Exception as e:
-                    st.error(f"讀取 CSV 失敗：{e}")
+                    st.error(f"讀取 progress CSV 失敗：{e}")
 
-        with st.sidebar.expander(f"⬆️ 上傳{user_name}測驗紀錄"):
-            st.caption("此功能會覆蓋目前使用者原本的測驗紀錄，不提供合併，避免重複紀錄。")
+            st.divider()
+
+            st.markdown("**上傳測驗紀錄 CSV**")
+            st.caption("測驗紀錄固定採用覆蓋模式，避免重複匯入。")
 
             sidebar_uploaded_quiz_csv = st.file_uploader(
-                "選擇 quiz_log CSV 備份檔",
+                "選擇 quiz_log CSV",
                 type=["csv"],
-                key=f"sidebar_upload_quiz_csv_{user_id}"
+                key=f"sidebar_upload_quiz_log_csv_{user_id}"
             )
 
             sidebar_confirm_quiz_import = st.checkbox(
@@ -324,12 +343,11 @@ def render_sidebar_quick_backup(user_id: str, user_name: str):
                             st.rerun()
                         else:
                             st.error(msg)
-
                 except Exception as e:
                     st.error(f"讀取 quiz_log CSV 失敗：{e}")
+
     except Exception as e:
         st.sidebar.warning(f"快速備份功能暫時無法使用：{e}")
-
 
 def render_sidebar_filters(merged_df: pd.DataFrame) -> dict:
     """側邊欄：學習範圍與模式。"""
