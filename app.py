@@ -105,13 +105,12 @@ st.markdown(
         margin-top: 0.8rem;
         margin-bottom: 0.4rem;
     }
-    .example-box {
+    .example-card {
         border: 1px solid rgba(160,160,160,0.25);
         border-radius: 14px;
         padding: 12px 14px;
         margin-bottom: 10px;
         background-color: rgba(255,255,255,0.035);
-        min-height: 110px;
     }
     .example-en {
         font-size: 1.02rem;
@@ -921,12 +920,18 @@ example_cols = st.columns(2)
 
 for idx, (num, en_text, zh_text) in enumerate(examples):
     with example_cols[idx % 2]:
-        st.markdown('<div class="example-box">', unsafe_allow_html=True)
-        st.markdown(f'<div class="example-en">{num}. {html.escape(en_text)}</div>', unsafe_allow_html=True)
-        if zh_text:
-            st.markdown(f'<div class="example-zh">{html.escape(zh_text)}</div>', unsafe_allow_html=True)
+        # 注意：
+        # 不要用「先開 <div>、中間放 st.button、最後再關 </div>」的寫法。
+        # Streamlit 會把 HTML 和按鈕拆成不同區塊，導致畫面出現空白框。
+        # 這裡改成把英文與中文放在同一段 HTML 裡，播放按鈕另外放在下面。
+        example_html = f"""
+        <div class="example-card">
+            <div class="example-en">{num}. {html.escape(en_text)}</div>
+            <div class="example-zh">{html.escape(zh_text)}</div>
+        </div>
+        """
+        st.markdown(example_html, unsafe_allow_html=True)
         audio_button(en_text, f"🔊 播放例句 {num}", key=f"example_audio_{current_word_id}_{num}")
-        st.markdown('</div>', unsafe_allow_html=True)
 
 
 # ============================================================
@@ -956,7 +961,7 @@ with st.expander("開發備註：第二階段目前完成內容"):
         """
         第二階段目前已加入：
 
-        1. `progress.db`：自動建立 SQLite 學習紀錄資料庫  
+        1. `progress.db`：自動建立 SQLite 學習紀錄資料庫，學習紀錄就存在這個檔案裡  
         2. 每個單字會記錄：狀態、熟練度、複習次數、答對、答錯、連續答對、上次複習、下次複習  
         3. 單字卡上有四個熟悉度按鈕：忘記了、不熟、認識、很熟  
         4. 依按鈕結果自動安排下次複習日期  
