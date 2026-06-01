@@ -86,3 +86,9 @@
 - 每題新增 question_id
 - 下一題 / 跳過時會清除 last_listening_autoplay_key
 - 自動播放會依 question_id 判斷，避免沿用上一題音檔
+
+
+修正：聽力測驗下一題會先播放上一題
+- 修改 audio.py 的 autoplay_audio()
+- 播放新音檔前會先停止頁面上既有的 audio
+- 避免上一題音檔殘留播放
