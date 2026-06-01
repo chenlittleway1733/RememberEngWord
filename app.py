@@ -11,7 +11,7 @@ import io
 
 # ============================================================
 # 國中英文單字智慧複習系統
-# app_v12.py
+# app_v13.py
 #
 # 本版方向：
 # 回到 SQLite + 下載備份，不使用 Google Sheets。
@@ -758,6 +758,92 @@ selected_user_name = selected_user_label.split("（")[0]
 
 
 # ============================================================
+# 9-1. 側邊欄：快速備份 / 上傳目前使用者紀錄
+# ============================================================
+#
+# 這裡放在使用者選單下方，方便切換到女兒、兒子、測試帳後，
+# 立刻下載或上傳該使用者自己的學習紀錄。
+#
+# 注意：
+# 1. 下載的是「目前選定使用者」的 CSV。
+# 2. 上傳 CSV 時，也只會匯入到「目前選定使用者」。
+# 3. 即使 CSV 裡有其他 user_id，匯入時也會強制改成目前帳號，避免匯錯。
+
+st.sidebar.markdown("### 💾 快速備份")
+
+try:
+    sidebar_selected_progress = load_progress(selected_user_id)
+
+    sidebar_csv_bytes = sidebar_selected_progress.to_csv(index=False).encode("utf-8-sig")
+    st.sidebar.download_button(
+        label=f"⬇️ 下載{selected_user_name}紀錄",
+        data=sidebar_csv_bytes,
+        file_name=f"{selected_user_id}_progress_backup.csv",
+        mime="text/csv",
+        key=f"sidebar_download_{selected_user_id}",
+        use_container_width=True
+    )
+
+    with st.sidebar.expander(f"⬆️ 上傳{selected_user_name}紀錄"):
+        st.caption("上傳 CSV 後，只會更新目前選定帳號。")
+
+        sidebar_import_mode_label = st.radio(
+            "匯入方式",
+            ["覆蓋", "合併"],
+            index=0,
+            horizontal=True,
+            key=f"sidebar_import_mode_{selected_user_id}"
+        )
+
+        sidebar_import_mode = "replace" if sidebar_import_mode_label == "覆蓋" else "merge"
+
+        sidebar_uploaded_csv = st.file_uploader(
+            "選擇 CSV 備份檔",
+            type=["csv"],
+            key=f"sidebar_upload_csv_{selected_user_id}"
+        )
+
+        sidebar_confirm_import = st.checkbox(
+            f"確認匯入到{selected_user_name}",
+            key=f"sidebar_confirm_import_{selected_user_id}"
+        )
+
+        if sidebar_uploaded_csv is not None:
+            try:
+                sidebar_preview_df = pd.read_csv(sidebar_uploaded_csv)
+
+                st.write("預覽前 3 筆：")
+                st.dataframe(
+                    sidebar_preview_df.head(3),
+                    use_container_width=True,
+                    hide_index=True
+                )
+
+                if st.button(
+                    "開始匯入",
+                    disabled=not sidebar_confirm_import,
+                    key=f"sidebar_start_import_{selected_user_id}",
+                    use_container_width=True
+                ):
+                    ok, msg = import_user_progress_from_csv(
+                        selected_user_id,
+                        sidebar_preview_df,
+                        import_mode=sidebar_import_mode
+                    )
+                    if ok:
+                        st.success(msg)
+                        st.rerun()
+                    else:
+                        st.error(msg)
+
+            except Exception as e:
+                st.error(f"讀取 CSV 失敗：{e}")
+
+except Exception as e:
+    st.sidebar.warning(f"快速備份功能暫時無法使用：{e}")
+
+
+# ============================================================
 # 10. 合併單字與目前使用者進度
 # ============================================================
 
@@ -896,7 +982,7 @@ st.sidebar.write(f"已掌握：**{mastered}**")
 
 st.markdown('<div class="main-title">📘 國中英文單字複習</div>', unsafe_allow_html=True)
 st.markdown(
-    '<div class="small-caption">第二階段：SQLite 學習紀錄 + 多使用者 + 分帳號上傳下載備份 + 舊資料庫自動遷移</div>',
+    '<div class="small-caption">第二階段：SQLite 學習紀錄 + 多使用者 + 側邊欄快速上傳下載 + 舊資料庫自動遷移</div>',
     unsafe_allow_html=True
 )
 
