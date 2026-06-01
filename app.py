@@ -7,10 +7,11 @@ import sqlite3
 from datetime import date, datetime, timedelta
 import base64
 import html
+import io
 
 # ============================================================
 # 國中英文單字智慧複習系統
-# app_v10.py
+# app_v11.py
 #
 # 本版方向：
 # 回到 SQLite + 下載備份，不使用 Google Sheets。
@@ -24,7 +25,7 @@ import html
 # 6. 忘記了 / 不熟 / 認識 / 很熟
 # 7. 簡化記憶曲線
 # 8. 今日複習、未學單字、學習中、已掌握
-# 9. 下載 progress.db 與 CSV 備份
+# 9. 依帳號下載 / 上傳 CSV 備份，並可還原完整 progress.db
 # ============================================================
 
 
@@ -535,6 +536,108 @@ def update_progress(user_id: str, word_row: pd.Series, level: str):
     conn.close()
 
 
+def import_user_progress_from_csv(user_id: str, csv_df: pd.DataFrame, import_mode: str = "replace") -> tuple[bool, str]:
+    """
+    匯入單一使用者的學習紀錄 CSV。
+
+    import_mode:
+    - replace：先刪除這個使用者原本所有進度，再匯入 CSV
+    - merge：只更新 CSV 裡有的紀錄，原本其他單字紀錄保留
+
+    為了避免把女兒紀錄匯到兒子帳號，程式會強制把匯入資料的 user_id 改成目前選定的 user_id。
+    """
+    required_cols = [
+        "word_id", "word", "grade", "semester", "lesson", "status",
+        "mastery", "review_count", "correct_count", "wrong_count",
+        "streak_correct", "last_review", "next_review", "updated_at"
+    ]
+
+    missing_cols = [col for col in required_cols if col not in csv_df.columns]
+    if missing_cols:
+        return False, f"CSV 缺少欄位：{', '.join(missing_cols)}"
+
+    conn = get_conn()
+    cur = conn.cursor()
+
+    if import_mode == "replace":
+        cur.execute("DELETE FROM progress WHERE user_id = ?", (user_id,))
+
+    for _, row in csv_df.iterrows():
+        word_id = safe_str(row.get("word_id", ""))
+        if not word_id:
+            continue
+
+        cur.execute(
+            """
+            INSERT OR REPLACE INTO progress
+            (user_id, word_id, word, grade, semester, lesson, status, mastery,
+             review_count, correct_count, wrong_count, streak_correct,
+             last_review, next_review, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                user_id,
+                word_id,
+                safe_str(row.get("word", "")),
+                safe_str(row.get("grade", "")),
+                safe_str(row.get("semester", "")),
+                safe_str(row.get("lesson", "")),
+                safe_str(row.get("status", "未學")) or "未學",
+                safe_int(row.get("mastery", 0)),
+                safe_int(row.get("review_count", 0)),
+                safe_int(row.get("correct_count", 0)),
+                safe_int(row.get("wrong_count", 0)),
+                safe_int(row.get("streak_correct", 0)),
+                safe_str(row.get("last_review", "")),
+                safe_str(row.get("next_review", "")),
+                safe_str(row.get("updated_at", "")) or datetime.now().isoformat(timespec="seconds"),
+            )
+        )
+
+    conn.commit()
+    conn.close()
+
+    # 確保 words.csv 內的新單字仍然有預設紀錄
+    ensure_progress_for_words(words_df)
+
+    return True, f"已匯入 {len(csv_df)} 筆紀錄到目前帳號。"
+
+
+def restore_full_db(uploaded_file) -> tuple[bool, str]:
+    """
+    還原完整 progress.db。
+    注意：這會覆蓋目前整個 progress.db，包含女兒、兒子、測試帳所有資料。
+    """
+    try:
+        uploaded_bytes = uploaded_file.getvalue()
+
+        # 先用記憶體測試是不是 SQLite 檔
+        test_path = Path("progress_upload_test.db")
+        test_path.write_bytes(uploaded_bytes)
+
+        test_conn = sqlite3.connect(test_path)
+        test_cur = test_conn.cursor()
+        test_cur.execute("SELECT name FROM sqlite_master WHERE type='table'")
+        table_names = [row[0] for row in test_cur.fetchall()]
+        test_conn.close()
+        test_path.unlink(missing_ok=True)
+
+        if "progress" not in table_names:
+            return False, "這個 db 檔沒有 progress 資料表，可能不是本程式的備份檔。"
+
+        # 覆蓋目前資料庫
+        DB_PATH.write_bytes(uploaded_bytes)
+
+        # 重新初始化，確保必要資料表存在
+        init_db()
+        ensure_progress_for_words(words_df)
+
+        return True, "已還原完整 progress.db。請重新整理頁面確認資料。"
+
+    except Exception as e:
+        return False, f"還原失敗：{e}"
+
+
 # ============================================================
 # 8. 載入資料與初始化
 # ============================================================
@@ -705,7 +808,7 @@ st.sidebar.write(f"已掌握：**{mastered}**")
 
 st.markdown('<div class="main-title">📘 國中英文單字複習</div>', unsafe_allow_html=True)
 st.markdown(
-    '<div class="small-caption">第二階段：SQLite 學習紀錄 + 多使用者 + 下載備份</div>',
+    '<div class="small-caption">第二階段：SQLite 學習紀錄 + 多使用者 + 分帳號上傳下載備份</div>',
     unsafe_allow_html=True
 )
 
@@ -999,47 +1102,125 @@ with st.expander("查看目前範圍的單字與學習狀態"):
     )
 
 
-with st.expander("備份 / 下載學習紀錄"):
+with st.expander("備份 / 上傳更新學習紀錄"):
     st.write("目前學習紀錄存在 `progress.db`。")
     st.warning("如果部署在 Streamlit Cloud，重新部署或休眠後資料可能遺失，建議定期下載備份。")
 
     all_progress = load_progress()
     selected_progress = load_progress(selected_user_id)
 
-    st.write(f"目前使用者：**{selected_user_name}**")
-    st.write(f"這位使用者目前共有 **{len(selected_progress)}** 筆學習紀錄。")
+    tab_download, tab_upload_user, tab_upload_db = st.tabs([
+        "下載備份",
+        "上傳單一帳號紀錄",
+        "還原完整資料庫"
+    ])
 
-    st.dataframe(selected_progress, use_container_width=True, hide_index=True)
+    with tab_download:
+        st.subheader("下載備份")
+        st.write(f"目前使用者：**{selected_user_name}**")
+        st.write(f"這位使用者目前共有 **{len(selected_progress)}** 筆學習紀錄。")
 
-    csv_bytes = selected_progress.to_csv(index=False).encode("utf-8-sig")
-    st.download_button(
-        label=f"下載 {selected_user_name} 的學習紀錄 CSV",
-        data=csv_bytes,
-        file_name=f"{selected_user_id}_progress_backup.csv",
-        mime="text/csv",
-        key=f"download_csv_{selected_user_id}"
-    )
+        st.dataframe(selected_progress, use_container_width=True, hide_index=True)
 
-    all_csv_bytes = all_progress.to_csv(index=False).encode("utf-8-sig")
-    st.download_button(
-        label="下載全部使用者學習紀錄 CSV",
-        data=all_csv_bytes,
-        file_name="all_progress_backup.csv",
-        mime="text/csv",
-        key="download_all_csv"
-    )
+        csv_bytes = selected_progress.to_csv(index=False).encode("utf-8-sig")
+        st.download_button(
+            label=f"下載 {selected_user_name} 的學習紀錄 CSV",
+            data=csv_bytes,
+            file_name=f"{selected_user_id}_progress_backup.csv",
+            mime="text/csv",
+            key=f"download_csv_{selected_user_id}"
+        )
 
-    if DB_PATH.exists():
-        with open(DB_PATH, "rb") as db_file:
-            st.download_button(
-                label="下載 progress.db 完整備份",
-                data=db_file,
-                file_name="progress.db",
-                mime="application/octet-stream",
-                key="download_db"
-            )
-    else:
-        st.error("目前找不到 progress.db。")
+        all_csv_bytes = all_progress.to_csv(index=False).encode("utf-8-sig")
+        st.download_button(
+            label="下載全部使用者學習紀錄 CSV",
+            data=all_csv_bytes,
+            file_name="all_progress_backup.csv",
+            mime="text/csv",
+            key="download_all_csv"
+        )
+
+        if DB_PATH.exists():
+            with open(DB_PATH, "rb") as db_file:
+                st.download_button(
+                    label="下載 progress.db 完整備份",
+                    data=db_file,
+                    file_name="progress.db",
+                    mime="application/octet-stream",
+                    key="download_db"
+                )
+        else:
+            st.error("目前找不到 progress.db。")
+
+    with tab_upload_user:
+        st.subheader("上傳單一帳號紀錄")
+        st.info(
+            f"這裡只會更新目前選定帳號：{selected_user_name}（{selected_user_id}）。"
+            "即使 CSV 裡有其他 user_id，匯入時也會改成目前帳號，避免匯錯。"
+        )
+
+        import_mode_label = st.radio(
+            "匯入方式",
+            ["覆蓋目前帳號紀錄", "合併更新目前帳號紀錄"],
+            index=0,
+            key=f"import_mode_{selected_user_id}"
+        )
+
+        import_mode = "replace" if import_mode_label == "覆蓋目前帳號紀錄" else "merge"
+
+        uploaded_csv = st.file_uploader(
+            f"上傳 {selected_user_name} 的 progress CSV 備份",
+            type=["csv"],
+            key=f"upload_csv_{selected_user_id}"
+        )
+
+        confirm_user_import = st.checkbox(
+            f"我確認要把上傳的 CSV 匯入到 {selected_user_name} 帳號",
+            key=f"confirm_user_import_{selected_user_id}"
+        )
+
+        if uploaded_csv is not None:
+            try:
+                preview_df = pd.read_csv(uploaded_csv)
+                st.write("CSV 預覽：")
+                st.dataframe(preview_df.head(10), use_container_width=True, hide_index=True)
+
+                if st.button("開始匯入單一帳號紀錄", disabled=not confirm_user_import, key=f"start_import_{selected_user_id}"):
+                    ok, msg = import_user_progress_from_csv(selected_user_id, preview_df, import_mode=import_mode)
+                    if ok:
+                        st.success(msg)
+                        st.rerun()
+                    else:
+                        st.error(msg)
+
+            except Exception as e:
+                st.error(f"讀取 CSV 失敗：{e}")
+
+    with tab_upload_db:
+        st.subheader("還原完整 progress.db")
+        st.error("這個功能會覆蓋整個 progress.db，包含女兒、兒子、測試帳所有資料。請只有在完整還原備份時使用。")
+
+        uploaded_db = st.file_uploader(
+            "上傳 progress.db 完整備份",
+            type=["db", "sqlite", "sqlite3"],
+            key="upload_full_db"
+        )
+
+        confirm_db_restore = st.checkbox(
+            "我確認要覆蓋目前完整 progress.db",
+            key="confirm_db_restore"
+        )
+
+        if uploaded_db is not None:
+            st.write(f"已選擇檔案：{uploaded_db.name}")
+
+            if st.button("開始還原完整資料庫", disabled=not confirm_db_restore, key="start_restore_db"):
+                ok, msg = restore_full_db(uploaded_db)
+                if ok:
+                    st.success(msg)
+                    st.rerun()
+                else:
+                    st.error(msg)
 
 
 with st.expander("開發備註：目前版本"):
@@ -1050,7 +1231,7 @@ with st.expander("開發備註：目前版本"):
         檔案說明：
 
         - `words.csv`：單字資料
-        - `progress.db`：學習紀錄資料庫
+        - `progress.db`：學習紀錄資料庫，可完整下載與還原
         - `audio_cache/`：發音 mp3 快取
 
         支援三個使用者：
@@ -1058,6 +1239,13 @@ with st.expander("開發備註：目前版本"):
         - 女兒
         - 兒子
         - 測試帳
+        
+        備份功能：
+        
+        - 可依目前帳號下載 CSV
+        - 可依目前帳號上傳 CSV 更新紀錄
+        - 可下載全部使用者 CSV
+        - 可下載 / 還原完整 progress.db
 
         接下來可繼續開發：
 
