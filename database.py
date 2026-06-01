@@ -383,6 +383,63 @@ def load_quiz_log(user_id: str | None = None) -> pd.DataFrame:
     return df
 
 
+def import_user_quiz_log_from_csv(user_id: str, csv_df: pd.DataFrame) -> tuple[bool, str]:
+    """
+    匯入單一使用者的測驗紀錄 CSV。
+
+    本功能固定使用「覆蓋目前使用者測驗紀錄」：
+    1. 先刪除目前 user_id 的 quiz_log
+    2. 再匯入上傳的 CSV
+    3. 即使 CSV 裡有其他 user_id，也會強制改成目前選定 user_id
+
+    這樣可以避免合併匯入造成重複測驗紀錄。
+    """
+    required_cols = [
+        "word_id", "word", "quiz_type", "question",
+        "correct_answer", "user_answer", "is_correct", "created_at"
+    ]
+
+    missing_cols = [col for col in required_cols if col not in csv_df.columns]
+    if missing_cols:
+        return False, f"CSV 缺少欄位：{', '.join(missing_cols)}"
+
+    conn = get_conn()
+    cur = conn.cursor()
+
+    # 固定覆蓋目前使用者測驗紀錄
+    cur.execute("DELETE FROM quiz_log WHERE user_id = ?", (user_id,))
+
+    for _, row in csv_df.iterrows():
+        word_id = safe_str(row.get("word_id", ""))
+        if not word_id:
+            continue
+
+        cur.execute(
+            """
+            INSERT INTO quiz_log
+            (user_id, word_id, word, quiz_type, question, correct_answer,
+             user_answer, is_correct, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                user_id,
+                word_id,
+                safe_str(row.get("word", "")),
+                safe_str(row.get("quiz_type", "")),
+                safe_str(row.get("question", "")),
+                safe_str(row.get("correct_answer", "")),
+                safe_str(row.get("user_answer", "")),
+                safe_int(row.get("is_correct", 0)),
+                safe_str(row.get("created_at", "")) or datetime.now().isoformat(timespec="seconds"),
+            )
+        )
+
+    conn.commit()
+    conn.close()
+
+    return True, f"已覆蓋匯入 {len(csv_df)} 筆測驗紀錄到目前帳號。"
+
+
 def import_user_progress_from_csv(user_id: str, csv_df: pd.DataFrame, import_mode: str = "replace") -> tuple[bool, str]:
     """匯入單一使用者的學習紀錄 CSV。"""
     required_cols = [
