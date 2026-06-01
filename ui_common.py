@@ -173,6 +173,7 @@ def render_sidebar_quick_backup(user_id: str, user_name: str):
     3. 分開下載 / 上傳 progress、quiz_log 放到「進階備份」裡，避免畫面混亂。
     """
     st.sidebar.markdown("### 💾 快速備份")
+    st.sidebar.caption("備份介面 v6：預設使用完整備份 JSON")
 
     try:
         # ----------------------------------------------------
