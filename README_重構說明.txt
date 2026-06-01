@@ -53,3 +53,19 @@
 - 側邊欄快速備份區最上方只放「完整備份 JSON」下載與上傳
 - 完整備份 JSON 同時包含 progress 學習紀錄與 quiz_log 測驗紀錄
 - 分開下載 / 上傳 progress、quiz_log 已移到「進階備份」裡
+
+
+更新：第四階段錯題本
+- 新增 ui_errors.py
+- 主功能新增「錯題本」
+- 錯題本會從 quiz_log 的答錯紀錄產生
+- 錯題本顯示錯誤次數、最近錯誤題目、錯誤答案、正確答案
+- 測驗模式的出題來源新增「錯題本」
+- 可下載目前使用者錯題本 CSV
+
+
+更新：完整備份 JSON 整合錯題本
+- 完整備份 JSON 現在包含 progress、quiz_log、error_notebook
+- error_notebook 是錯題本統計快照，方便人工查看
+- 還原時主要還原 progress 與 quiz_log
+- 錯題本會依 quiz_log 自動重新產生，因此不需要另外匯入錯題本 CSV

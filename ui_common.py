@@ -212,6 +212,7 @@ def render_sidebar_quick_backup(user_id: str, user_name: str):
                     st.write(f"原使用者：{backup_data.get('user_name', '')}（{backup_data.get('user_id', '')}）")
                     st.write(f"學習紀錄：{len(backup_data.get('progress', []))} 筆")
                     st.write(f"測驗紀錄：{len(backup_data.get('quiz_log', []))} 筆")
+                    st.write(f"錯題本快照：{len(backup_data.get('error_notebook', []))} 筆")
 
                     if st.button(
                         "開始覆蓋匯入完整備份",
@@ -513,6 +514,7 @@ def render_backup_section(user_id: str, user_name: str):
                     st.write(f"原使用者：{backup_data.get('user_name', '')}（{backup_data.get('user_id', '')}）")
                     st.write(f"學習紀錄：{len(backup_data.get('progress', []))} 筆")
                     st.write(f"測驗紀錄：{len(backup_data.get('quiz_log', []))} 筆")
+                    st.write(f"錯題本快照：{len(backup_data.get('error_notebook', []))} 筆")
 
                     if st.button("開始覆蓋匯入完整備份", disabled=not confirm_combined_import, key=f"start_combined_import_{user_id}"):
                         ok, msg = import_user_combined_backup(user_id, backup_data)

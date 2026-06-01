@@ -17,7 +17,7 @@ import streamlit as st
 from utils import safe_str, normalize_answer
 from data import filter_words
 from audio import audio_button
-from database import update_progress, log_quiz_result, load_quiz_log
+from database import update_progress, log_quiz_result, load_quiz_log, get_error_word_ids
 from quiz import get_quiz_pool, prepare_new_quiz_question
 
 
@@ -67,7 +67,7 @@ def render_quiz_page(merged_df: pd.DataFrame, user_id: str, user_name: str, filt
     with quiz_col2:
         quiz_source = st.selectbox(
             "出題來源",
-            ["目前範圍", "今日複習", "未學單字", "學習中"],
+            ["目前範圍", "今日複習", "未學單字", "學習中", "錯題本"],
             key="quiz_source"
         )
 
@@ -133,8 +133,13 @@ def render_quiz_page(merged_df: pd.DataFrame, user_id: str, user_name: str, filt
         ].copy()
     elif quiz_source == "未學單字":
         quiz_source_df = merged_df[merged_df["status"].astype(str).isin(["", "未學"])].copy()
-    else:
+    elif quiz_source == "學習中":
         quiz_source_df = merged_df[merged_df["status"].astype(str).isin(["學習中", "熟悉"])].copy()
+    elif quiz_source == "錯題本":
+        error_word_ids = get_error_word_ids(user_id)
+        quiz_source_df = merged_df[merged_df["word_id"].astype(str).isin(error_word_ids)].copy()
+    else:
+        quiz_source_df = merged_df.copy()
 
     quiz_pool = get_quiz_pool(quiz_source_df, quiz_type)
     st.info(f"目前題庫共有 {len(quiz_pool)} 個可出題單字。")

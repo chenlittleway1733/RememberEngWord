@@ -384,6 +384,125 @@ def load_quiz_log(user_id: str | None = None) -> pd.DataFrame:
     return df
 
 
+def load_error_summary(user_id: str) -> pd.DataFrame:
+    """
+    讀取目前使用者的錯題統計。
+
+    統計方式：
+    - wrong_count：答錯次數
+    - total_count：總作答次數
+    - correct_count：答對次數
+    - last_wrong_at：最近答錯時間
+    - last_wrong_answer：最近一次錯誤答案
+    - last_correct_answer：最近一次正確答案
+    - last_question：最近一次錯誤題目
+
+    錯題本會依 wrong_count 由多到少排序。
+    """
+    conn = get_conn()
+
+    query = """
+    WITH wrong_latest AS (
+        SELECT
+            user_id,
+            word_id,
+            MAX(id) AS last_wrong_id
+        FROM quiz_log
+        WHERE user_id = ? AND is_correct = 0
+        GROUP BY user_id, word_id
+    )
+    SELECT
+        q.word_id,
+        q.word,
+        SUM(CASE WHEN q.is_correct = 0 THEN 1 ELSE 0 END) AS wrong_count,
+        SUM(CASE WHEN q.is_correct = 1 THEN 1 ELSE 0 END) AS correct_count,
+        COUNT(*) AS total_count,
+        wlq.quiz_type AS last_quiz_type,
+        wlq.question AS last_question,
+        wlq.user_answer AS last_wrong_answer,
+        wlq.correct_answer AS last_correct_answer,
+        wlq.created_at AS last_wrong_at
+    FROM quiz_log q
+    JOIN wrong_latest w
+        ON q.user_id = w.user_id AND q.word_id = w.word_id
+    JOIN quiz_log wlq
+        ON wlq.id = w.last_wrong_id
+    WHERE q.user_id = ?
+    GROUP BY
+        q.word_id,
+        q.word,
+        wlq.quiz_type,
+        wlq.question,
+        wlq.user_answer,
+        wlq.correct_answer,
+        wlq.created_at
+    HAVING wrong_count > 0
+    ORDER BY wrong_count DESC, last_wrong_at DESC
+    """
+
+    df = pd.read_sql_query(query, conn, params=(user_id, user_id))
+    conn.close()
+
+    return df
+
+
+def load_error_details(user_id: str, word_id: str | None = None) -> pd.DataFrame:
+    """
+    讀取答錯明細。
+    如果指定 word_id，就只讀取該單字的錯題明細。
+    """
+    conn = get_conn()
+
+    if word_id:
+        df = pd.read_sql_query(
+            """
+            SELECT
+                word,
+                quiz_type,
+                question,
+                user_answer,
+                correct_answer,
+                created_at
+            FROM quiz_log
+            WHERE user_id = ? AND word_id = ? AND is_correct = 0
+            ORDER BY id DESC
+            """,
+            conn,
+            params=(user_id, word_id)
+        )
+    else:
+        df = pd.read_sql_query(
+            """
+            SELECT
+                word,
+                quiz_type,
+                question,
+                user_answer,
+                correct_answer,
+                created_at
+            FROM quiz_log
+            WHERE user_id = ? AND is_correct = 0
+            ORDER BY id DESC
+            """,
+            conn,
+            params=(user_id,)
+        )
+
+    conn.close()
+    return df
+
+
+def get_error_word_ids(user_id: str) -> list[str]:
+    """
+    回傳目前使用者曾經答錯過的 word_id。
+    測驗模式的「錯題本」出題來源會使用這個函式。
+    """
+    error_df = load_error_summary(user_id)
+    if error_df.empty:
+        return []
+    return error_df["word_id"].dropna().astype(str).unique().tolist()
+
+
 def import_user_quiz_log_from_csv(user_id: str, csv_df: pd.DataFrame) -> tuple[bool, str]:
     """
     匯入單一使用者的測驗紀錄 CSV。
@@ -444,23 +563,30 @@ def import_user_quiz_log_from_csv(user_id: str, csv_df: pd.DataFrame) -> tuple[b
 def export_user_combined_backup(user_id: str, user_name: str) -> bytes:
     """
     匯出單一使用者的完整備份 JSON。
+
     內容包含：
     1. progress 學習紀錄
     2. quiz_log 測驗紀錄
+    3. error_notebook 錯題本統計快照
 
-    這個 JSON 適合用來「一次下載」與「一次上傳還原」。
+    注意：
+    error_notebook 是由 quiz_log 計算出來的統計結果。
+    還原時主要還原 progress 與 quiz_log；
+    錯題本會依還原後的 quiz_log 重新產生。
     """
     progress_df = load_progress(user_id)
     quiz_log_df = load_quiz_log(user_id)
+    error_df = load_error_summary(user_id)
 
     backup_data = {
         "backup_type": "vocab_app_user_backup",
-        "version": "1.0",
+        "version": "1.1",
         "exported_at": datetime.now().isoformat(timespec="seconds"),
         "user_id": user_id,
         "user_name": user_name,
         "progress": progress_df.to_dict(orient="records"),
         "quiz_log": quiz_log_df.to_dict(orient="records"),
+        "error_notebook": error_df.to_dict(orient="records"),
     }
 
     return json.dumps(backup_data, ensure_ascii=False, indent=2).encode("utf-8")
@@ -481,6 +607,7 @@ def import_user_combined_backup(user_id: str, backup_data: dict) -> tuple[bool, 
 
     progress_records = backup_data.get("progress", [])
     quiz_log_records = backup_data.get("quiz_log", [])
+    error_records = backup_data.get("error_notebook", [])
 
     if not isinstance(progress_records, list):
         return False, "JSON 中的 progress 格式不正確。"
@@ -517,7 +644,12 @@ def import_user_combined_backup(user_id: str, backup_data: dict) -> tuple[bool, 
         conn.commit()
         conn.close()
 
-    return True, f"已完成單一使用者完整還原：學習紀錄 {len(progress_records)} 筆，測驗紀錄 {len(quiz_log_records)} 筆。"
+    return True, (
+        f"已完成單一使用者完整還原："
+        f"學習紀錄 {len(progress_records)} 筆，"
+        f"測驗紀錄 {len(quiz_log_records)} 筆。"
+        f"錯題本會由測驗紀錄自動重建；備份檔內含錯題本快照 {len(error_records)} 筆。"
+    )
 
 
 def import_user_progress_from_csv(user_id: str, csv_df: pd.DataFrame, import_mode: str = "replace") -> tuple[bool, str]:

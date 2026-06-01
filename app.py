@@ -38,6 +38,7 @@ from ui_common import (
 )
 from ui_cards import render_vocab_card_page
 from ui_quiz import render_quiz_page
+from ui_errors import render_error_notebook_page
 
 
 # ============================================================
@@ -141,7 +142,7 @@ metric_col3.metric("已掌握", mastered)
 
 app_mode = st.radio(
     "功能模式",
-    ["單字卡學習", "測驗模式"],
+    ["單字卡學習", "測驗模式", "錯題本"],
     horizontal=True,
     index=0,
     key="app_mode"
@@ -166,4 +167,10 @@ elif app_mode == "測驗模式":
         user_id=selected_user_id,
         user_name=selected_user_name,
         filter_state=filter_state
+    )
+
+elif app_mode == "錯題本":
+    render_error_notebook_page(
+        user_id=selected_user_id,
+        user_name=selected_user_name
     )
