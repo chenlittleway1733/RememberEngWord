@@ -39,6 +39,8 @@ from ui_common import (
 from ui_cards import render_vocab_card_page
 from ui_quiz import render_quiz_page
 from ui_errors import render_error_notebook_page
+from ui_stats import render_stats_page
+from ui_listening import render_listening_page
 
 
 # ============================================================
@@ -116,7 +118,7 @@ render_sidebar_stats(
 
 st.markdown('<div class="main-title">📘 國中英文單字複習</div>', unsafe_allow_html=True)
 st.markdown(
-    '<div class="small-caption">第三階段：單字卡學習 + 測驗模式 + SQLite 學習紀錄</div>',
+    '<div class="small-caption">進階版：單字卡 + 測驗 + 錯題本 + 統計報表 + 聽力測驗</div>',
     unsafe_allow_html=True
 )
 
@@ -142,7 +144,7 @@ metric_col3.metric("已掌握", mastered)
 
 app_mode = st.radio(
     "功能模式",
-    ["單字卡學習", "測驗模式", "錯題本"],
+    ["單字卡學習", "測驗模式", "錯題本", "統計報表", "聽力測驗"],
     horizontal=True,
     index=0,
     key="app_mode"
@@ -173,4 +175,19 @@ elif app_mode == "錯題本":
     render_error_notebook_page(
         user_id=selected_user_id,
         user_name=selected_user_name
+    )
+
+elif app_mode == "統計報表":
+    render_stats_page(
+        user_id=selected_user_id,
+        user_name=selected_user_name,
+        merged_df=merged_df
+    )
+
+elif app_mode == "聽力測驗":
+    render_listening_page(
+        merged_df=merged_df,
+        user_id=selected_user_id,
+        user_name=selected_user_name,
+        filter_state=filter_state
     )
