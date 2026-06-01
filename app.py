@@ -1,547 +1,133 @@
-# =====================================================
-# 女兒專用英文單字複習系統
-# app_v5 中文註解版
-# -----------------------------------------------------
-# 這個程式使用 Streamlit 製作網頁介面。
-# 目前功能：
-# 1. 固定讀取 words.csv
-# 2. 依年級、學期、課次、詞性篩選單字
-# 3. 顯示單字卡
-# 4. 顯示動詞三態、現在分詞、及物/不及物、複數規則、常用用法
-# 5. 使用 edge-tts 產生單字與例句發音 mp3
-# 6. 將發音檔快取在 audio_cache 資料夾，避免重複產生
-# =====================================================
-
-# asyncio：處理非同步工作。edge-tts 產生語音時會用到。
-import asyncio
-
-# hashlib：用文字產生固定的雜湊值，讓每一句話都能對應到唯一 mp3 檔名。
-import hashlib
-
-# pathlib.Path：比一般字串路徑更好管理檔案與資料夾。
-from pathlib import Path
-
-# pandas：讀取與處理 CSV 表格資料。
-import pandas as pd
-
-# streamlit：建立網頁介面。
 import streamlit as st
+import pandas as pd
+from pathlib import Path
+import asyncio
+import hashlib
+import sqlite3
+from datetime import date, datetime, timedelta
+import base64
+import html
+
+# ============================================================
+# 國中英文單字智慧複習系統
+# app_v6.py
+#
+# 目前版本功能：
+# 第一階段：
+# 1. 讀取 words.csv
+# 2. 單字卡
+# 3. 年級 / 學期 / 課次 / 詞性篩選
+# 4. 單字與例句顯示
+# 5. edge-tts 發音
+# 6. 開啟單字卡後自動播放單字一次
+#
+# 第二階段：
+# 1. 使用 SQLite 建立 progress.db
+# 2. 記錄每個單字的學習狀況
+# 3. 加入「忘記了 / 不熟 / 認識 / 很熟」按鈕
+# 4. 依簡化記憶曲線自動安排下次複習日
+# 5. 今日複習清單
+# 6. 學習進度統計
+# ============================================================
 
 
-# =====================================================
-# 一、Streamlit 網頁基本設定
-# =====================================================
-# st.set_page_config 通常要放在程式最前面。
-# page_title：瀏覽器分頁標題。
-# page_icon：瀏覽器分頁小圖示。
-# layout="wide"：寬版版面，比較適合 iPad 橫向或電腦。
+# ============================================================
+# 1. 基本檔案路徑設定
+# ============================================================
+
+# 單字表固定使用 words.csv
+DATA_PATH = Path("words.csv")
+
+# 學習紀錄資料庫
+DB_PATH = Path("progress.db")
+
+# 發音快取資料夾
+AUDIO_DIR = Path("audio_cache")
+AUDIO_DIR.mkdir(exist_ok=True)
+
+# edge-tts 語音設定
+# zh-TW-HsiaoChenNeural 是中文聲音，英文建議用 en-US-JennyNeural 或 en-US-AriaNeural
+VOICE = "en-US-JennyNeural"
+
+
+# ============================================================
+# 2. Streamlit 頁面設定
+# ============================================================
+
 st.set_page_config(
-    page_title="女兒專用英文單字複習",
+    page_title="國中英文單字複習",
     page_icon="📘",
     layout="wide"
 )
 
 
-# =====================================================
-# 二、檔案與資料夾路徑設定
-# =====================================================
-# 單字表固定讀取 words.csv。
-# 所以 GitHub / Streamlit Cloud 裡要有 app.py 和 words.csv。
-DATA_PATH = Path("words.csv")
+# ============================================================
+# 3. 自訂 CSS：讓畫面比較適合 iPad 橫向瀏覽
+# ============================================================
 
-# 發音檔快取資料夾。
-# 產生過的單字或例句 mp3 會存在這裡，下次不用重新產生。
-AUDIO_DIR = Path("audio_cache")
-
-# 如果 audio_cache 資料夾不存在，就自動建立。
-# exist_ok=True 表示資料夾已存在也不會報錯。
-AUDIO_DIR.mkdir(exist_ok=True)
-
-
-# =====================================================
-# 三、CSV 必要欄位設定
-# =====================================================
-# 程式至少需要這些欄位才能正常顯示單字卡。
-# 如果 words.csv 缺少其中任何一欄，程式會顯示錯誤。
-BASE_REQUIRED_COLUMNS = [
-    "word", "meaning", "pos", "base_form", "past", "past_participle",
-    "present_participle", "transitivity", "plural", "plural_rule",
-    "grade", "semester", "lesson", "tags", "note"
-]
-
-
-# =====================================================
-# 四、小工具函式：清理文字
-# =====================================================
-def clean_text(value) -> str:
-    """
-    把 CSV 讀進來的資料整理成乾淨文字。
-
-    為什麼需要這個函式？
-    1. CSV 空白欄位在 pandas 裡可能變成 NaN。
-    2. 有些資料前後可能多空白。
-    3. Streamlit 顯示 NaN 會不好看。
-
-    回傳：
-    - 如果是空值，回傳空字串 ""
-    - 否則轉成字串並去掉前後空白
-    """
-    if pd.isna(value):
-        return ""
-    return str(value).strip()
-
-
-# =====================================================
-# 五、小工具函式：把詞性轉成程式判斷用英文代碼
-# =====================================================
-def normalize_pos_en(pos_text: str) -> str:
-    """
-    將詞性欄位轉成程式容易判斷的英文代碼。
-
-    例如：
-    - verb（動詞） → verb
-    - 動詞 → verb
-    - noun（名詞） → noun
-    - adjective（形容詞） → adjective
-
-    這樣後面就可以用：
-        if pos_en == "verb":
-    來判斷是不是動詞。
-    """
-    text = clean_text(pos_text).lower()
-
-    if "verb" in text or "動詞" in text:
-        return "verb"
-    if "noun" in text or "名詞" in text:
-        return "noun"
-    if "adjective" in text or "adj" in text or "形容詞" in text:
-        return "adjective"
-    if "adverb" in text or "adv" in text or "副詞" in text:
-        return "adverb"
-    if "pronoun" in text or "代名詞" in text:
-        return "pronoun"
-
-    # 如果都不符合，就回傳清理後的原始文字。
-    return text
-
-
-# =====================================================
-# 六、小工具函式：把詞性轉成中文顯示
-# =====================================================
-def normalize_pos_zh(pos_text: str) -> str:
-    """
-    將詞性欄位轉成女兒比較看得懂的中文。
-
-    例如：
-    - verb → 動詞
-    - noun → 名詞
-    - adjective → 形容詞
-    - adverb → 副詞
-    """
-    text = clean_text(pos_text).lower()
-
-    if "verb" in text or "動詞" in text:
-        return "動詞"
-    if "noun" in text or "名詞" in text:
-        return "名詞"
-    if "adjective" in text or "adj" in text or "形容詞" in text:
-        return "形容詞"
-    if "adverb" in text or "adv" in text or "副詞" in text:
-        return "副詞"
-    if "pronoun" in text or "代名詞" in text:
-        return "代名詞"
-    if "number" in text or "數字" in text:
-        return "數字"
-
-    # 如果無法判斷，就顯示原本內容；如果原本也空白，就顯示未分類。
-    return clean_text(pos_text) or "未分類"
-
-
-# =====================================================
-# 七、小工具函式：自動產生詞性說明
-# =====================================================
-def default_pos_note(pos_en: str, pos_zh: str) -> str:
-    """
-    如果 words.csv 沒有 pos_note 欄位，程式會自動產生簡單中文說明。
-    這是為了相容舊版單字表。
-    """
-    if pos_en == "verb":
-        return "表示動作或狀態，例如 be 表示「是、在」。"
-    if pos_en == "noun":
-        return "表示人、事、物或概念。"
-    if pos_en == "adjective":
-        return "用來形容名詞，例如 my book、happy boy。"
-    if pos_en == "adverb":
-        return "用來修飾動詞、形容詞或整個句子。"
-    if pos_en == "pronoun":
-        return "用來代替名詞。"
-    if "數字" in pos_zh:
-        return "可表示數字，也可當名詞使用。"
-    return ""
-
-
-# =====================================================
-# 八、讀取 words.csv
-# =====================================================
-@st.cache_data
-def load_words() -> pd.DataFrame:
-    """
-    讀取 words.csv 並整理資料。
-
-    @st.cache_data 的作用：
-    Streamlit 每次互動都會重新執行整個 app.py。
-    如果每次都重新讀 CSV，資料多時會變慢。
-    加上 @st.cache_data 後，只要 words.csv 沒變，Streamlit 會使用快取結果。
-    """
-
-    # 檢查 words.csv 是否存在。
-    if not DATA_PATH.exists():
-        st.error("找不到 words.csv，請把 words.csv 和 app.py 放在同一個資料夾。")
-        return pd.DataFrame()
-
-    # 讀取 CSV。
-    # dtype=str：全部欄位都用文字讀取，避免數字或空白被自動轉型。
-    # fillna("")：把空值補成空字串。
-    df = pd.read_csv(DATA_PATH, dtype=str).fillna("")
-
-    # 清理欄位名稱前後空白。
-    df.columns = [c.strip() for c in df.columns]
-
-    # 檢查必要欄位是否存在。
-    missing = [c for c in BASE_REQUIRED_COLUMNS if c not in df.columns]
-    if missing:
-        st.error("words.csv 缺少欄位：" + "、".join(missing))
-        return pd.DataFrame()
-
-    # 清理每一欄的文字內容。
-    for col in df.columns:
-        df[col] = df[col].map(clean_text)
-
-    # -------------------------------------------------
-    # 相容舊版 words.csv：如果缺少新版欄位，就自動補上。
-    # -------------------------------------------------
-
-    # pos_en：給程式判斷用。
-    if "pos_en" not in df.columns:
-        df["pos_en"] = df["pos"].map(normalize_pos_en)
-
-    # pos_zh：給使用者看。
-    if "pos_zh" not in df.columns:
-        df["pos_zh"] = df["pos"].map(normalize_pos_zh)
-
-    # pos_note：詞性說明。
-    if "pos_note" not in df.columns:
-        df["pos_note"] = df.apply(lambda r: default_pos_note(r["pos_en"], r["pos_zh"]), axis=1)
-
-    # required_prepositions：固定搭配介系詞，例如 afraid of、listen to。
-    if "required_prepositions" not in df.columns:
-        df["required_prepositions"] = ""
-
-    # usage_patterns：常用句型，例如 How old are you? / What about ...?
-    if "usage_patterns" not in df.columns:
-        df["usage_patterns"] = ""
-
-    # -------------------------------------------------
-    # 相容舊版單一例句欄位。
-    # 舊版可能只有 example / example_zh。
-    # 新版支援 example_1 ~ example_5。
-    # -------------------------------------------------
-    if "example_1" not in df.columns and "example" in df.columns:
-        df["example_1"] = df["example"]
-    if "example_zh_1" not in df.columns and "example_zh" in df.columns:
-        df["example_zh_1"] = df["example_zh"]
-
-    # 確保 example_1 ~ example_5 和 example_zh_1 ~ example_zh_5 都存在。
-    for i in range(1, 6):
-        if f"example_{i}" not in df.columns:
-            df[f"example_{i}"] = ""
-        if f"example_zh_{i}" not in df.columns:
-            df[f"example_zh_{i}"] = ""
-
-    return df
-
-
-# =====================================================
-# 九、小工具函式：產生下拉選單選項
-# =====================================================
-def option_list(df: pd.DataFrame, col: str):
-    """
-    從某個欄位抓出不重複的值，做成下拉選單選項。
-
-    例如 grade 欄位有：七年級、八年級
-    回傳：全部、七年級、八年級
-    """
-    values = sorted([v for v in df[col].dropna().unique().tolist() if clean_text(v)])
-    return ["全部"] + values
-
-
-# =====================================================
-# 十、小工具函式：跨多欄搜尋
-# =====================================================
-def contains_any_column(df: pd.DataFrame, keyword: str, cols: list[str]) -> pd.Series:
-    """
-    在多個欄位中搜尋關鍵字。
-
-    回傳一個 True/False 序列，表示每一列是否符合搜尋。
-
-    regex=False：把關鍵字當一般文字，不當正規表示式，避免特殊符號造成錯誤。
-    """
-    mask = pd.Series(False, index=df.index)
-    for col in cols:
-        if col in df.columns:
-            mask = mask | df[col].astype(str).str.contains(keyword, case=False, na=False, regex=False)
-    return mask
-
-
-# =====================================================
-# 十一、發音功能：產生音檔檔名
-# =====================================================
-def audio_filename(text: str) -> Path:
-    """
-    將一段英文文字轉成固定 mp3 檔名。
-
-    為什麼不用原本文字當檔名？
-    因為例句可能有空白、標點符號、問號，當檔名可能不穩定。
-    所以用 MD5 雜湊產生安全檔名。
-    """
-    key = hashlib.md5(text.encode("utf-8")).hexdigest()
-    return AUDIO_DIR / f"{key}.mp3"
-
-
-# =====================================================
-# 十二、發音功能：非同步產生 mp3
-# =====================================================
-async def _make_audio_async(text: str, filename: Path):
-    """
-    使用 edge-tts 產生語音檔。
-
-    edge-tts 是非同步套件，所以這個函式要加 async。
-    voice="en-US-AriaNeural"：使用美式英文女聲。
-    rate="-10%"：稍微放慢速度，適合國中生。
-    """
-    import edge_tts
-
-    communicate = edge_tts.Communicate(text=text, voice="en-US-AriaNeural", rate="-10%")
-    await communicate.save(str(filename))
-
-
-# =====================================================
-# 十三、發音功能：產生或讀取快取音檔
-# =====================================================
-def make_audio(text: str) -> Path | None:
-    """
-    產生英文發音 mp3，並回傳檔案路徑。
-
-    流程：
-    1. 清理文字。
-    2. 如果文字為空，就不產生。
-    3. 算出快取檔名。
-    4. 如果 mp3 已存在，就直接回傳。
-    5. 如果不存在，就用 edge-tts 產生。
-    """
-    text = clean_text(text)
-    if not text:
-        return None
-
-    filename = audio_filename(text)
-
-    # 如果音檔已存在，而且檔案大小大於 0，就直接使用，不重新產生。
-    if filename.exists() and filename.stat().st_size > 0:
-        return filename
-
-    try:
-        # 一般情況：直接執行非同步函式。
-        asyncio.run(_make_audio_async(text, filename))
-        return filename
-
-    except RuntimeError:
-        # 某些環境已經有 event loop，asyncio.run 可能會報錯。
-        # 這時改用新的 event loop 執行。
-        loop = asyncio.new_event_loop()
-        try:
-            loop.run_until_complete(_make_audio_async(text, filename))
-            return filename
-        finally:
-            loop.close()
-
-    except ModuleNotFoundError:
-        # requirements.txt 沒有 edge-tts 時會出現這個錯誤。
-        st.warning("尚未安裝 edge-tts，請在 requirements.txt 加上 edge-tts 後重新部署。")
-        return None
-
-    except Exception as e:
-        # 其他錯誤，例如網路問題、TTS 服務暫時失敗等。
-        st.warning(f"產生發音失敗：{e}")
-        return None
-
-
-# =====================================================
-# 十四、發音按鈕元件
-# =====================================================
-def speak_button(text: str, label: str, key: str):
-    """
-    建立一個發音按鈕。
-
-    text：要朗讀的英文文字。
-    label：按鈕文字，例如「🔊 單字發音」。
-    key：Streamlit 按鈕的唯一識別碼。
-
-    注意：
-    Streamlit 同一頁如果有很多按鈕，每個按鈕的 key 必須不同。
-    """
-    if st.button(label, key=key, use_container_width=True):
-        audio_path = make_audio(text)
-        if audio_path and audio_path.exists():
-            # st.audio 可以播放音檔。
-            # 這裡用 read_bytes() 讀入音檔內容，部署時比較穩定。
-            st.audio(audio_path.read_bytes(), format="audio/mp3")
-
-
-# =====================================================
-# 十五、表格顯示元件
-# =====================================================
-def info_table(rows: list[tuple[str, str]], columns: int = 2):
-    """
-    用 HTML 表格顯示資料。
-
-    rows：資料列，格式是 [(標題, 內容), (標題, 內容)]
-    columns：一列要放幾組資料。
-
-    例如 columns=2 時，一列會放：
-    標題 / 內容 / 標題 / 內容
-
-    這樣可以避免畫面右邊太空。
-    """
-
-    # 移除內容空白的項目。
-    rows = [(a, clean_text(b)) for a, b in rows if clean_text(b)]
-    if not rows:
-        return
-
-    html_rows = []
-
-    # 每 columns 個資料合成一列。
-    for i in range(0, len(rows), columns):
-        chunk = rows[i:i + columns]
-        cells = []
-
-        for label, value in chunk:
-            safe_label = str(label)
-
-            # 把英文分號 ; 換成中文分號與空格，比較好閱讀。
-            safe_value = str(value).replace(";", "； ")
-            cells.append(f"<td class='label'>{safe_label}</td><td>{safe_value}</td>")
-
-        # 如果最後一列不足 columns 組，補空白欄位，避免表格歪掉。
-        while len(chunk) < columns:
-            cells.append("<td class='label'></td><td></td>")
-            chunk.append(("", ""))
-
-        html_rows.append("<tr>" + "".join(cells) + "</tr>")
-
-    # unsafe_allow_html=True：允許 Streamlit 顯示自訂 HTML。
-    st.markdown(
-        "<table class='info-table'>" + "".join(html_rows) + "</table>",
-        unsafe_allow_html=True
-    )
-
-
-# =====================================================
-# 十六、小標題元件
-# =====================================================
-def section_title(text: str):
-    """
-    顯示小區塊標題。
-    這裡用自訂 CSS class，讓標題比 Streamlit 預設標題小一點。
-    """
-    st.markdown(f"<div class='section-title'>{text}</div>", unsafe_allow_html=True)
-
-
-# =====================================================
-# 十七、CSS 版面設定
-# =====================================================
-# Streamlit 可以用 st.markdown 插入 CSS。
-# 這裡主要用來調整：
-# - 頁面寬度
-# - 標題大小
-# - 單字卡樣式
-# - 表格樣式
-# - 例句區塊樣式
 st.markdown(
     """
     <style>
-    .block-container {
-        padding-top: 1.5rem;
-        max-width: 1180px;
-    }
-    h1 {
-        font-size: 2rem !important;
-    }
-    h2, h3 {
-        font-size: 1.15rem !important;
-        margin-top: 0.6rem !important;
-        margin-bottom: 0.35rem !important;
-    }
-    .section-title {
-        font-size: 1.15rem;
+    .main-title {
+        font-size: 2.0rem;
         font-weight: 800;
-        margin-top: 1rem;
-        margin-bottom: 0.45rem;
-        border-left: 5px solid #8aa4ff;
-        padding-left: 0.55rem;
-    }
-    .word-card {
-        border: 1px solid rgba(128,128,128,0.25);
-        border-radius: 18px;
-        padding: 1.1rem 1.25rem;
-        margin: 0.6rem 0 0.8rem 0;
-        box-shadow: 0 2px 10px rgba(0,0,0,0.08);
-    }
-    .word-title {
-        font-size: 2.6rem;
-        font-weight: 900;
-        line-height: 1.1;
         margin-bottom: 0.2rem;
     }
-    .meaning-title {
-        font-size: 1.25rem;
-        opacity: 0.85;
-    }
-    .small-note {
+    .small-caption {
+        color: #888;
         font-size: 0.95rem;
-        opacity: 0.75;
-        margin-top: 0.25rem;
+        margin-bottom: 1.0rem;
     }
-    .info-table {
-        width: 100%;
-        border-collapse: collapse;
-        margin-bottom: 0.45rem;
-        font-size: 0.98rem;
+    .word-card {
+        border: 1px solid rgba(180,180,180,0.35);
+        border-radius: 18px;
+        padding: 22px;
+        margin-bottom: 14px;
+        background-color: rgba(255,255,255,0.04);
+        box-shadow: 0 4px 16px rgba(0,0,0,0.12);
     }
-    .info-table td {
-        border: 1px solid rgba(128,128,128,0.22);
-        padding: 0.5rem 0.65rem;
-        vertical-align: top;
+    .word-text {
+        text-align: center;
+        font-size: 3.0rem;
+        font-weight: 900;
+        line-height: 1.1;
+        margin-bottom: 0.6rem;
     }
-    .info-table .label {
-        width: 16%;
+    .meaning-text {
+        text-align: center;
+        font-size: 1.45rem;
+        font-weight: 700;
+        color: #BBBBBB;
+    }
+    .section-title {
+        font-size: 1.18rem;
         font-weight: 800;
-        background: rgba(128,128,128,0.10);
-        white-space: nowrap;
+        margin-top: 0.8rem;
+        margin-bottom: 0.4rem;
     }
     .example-box {
-        border: 1px solid rgba(128,128,128,0.22);
-        border-radius: 12px;
-        padding: 0.65rem 0.8rem;
-        margin-bottom: 0.5rem;
+        border: 1px solid rgba(160,160,160,0.25);
+        border-radius: 14px;
+        padding: 12px 14px;
+        margin-bottom: 10px;
+        background-color: rgba(255,255,255,0.035);
+        min-height: 110px;
     }
     .example-en {
-        font-weight: 800;
         font-size: 1.02rem;
+        font-weight: 700;
+        margin-bottom: 0.35rem;
     }
     .example-zh {
-        opacity: 0.75;
-        margin-top: 0.18rem;
+        font-size: 0.95rem;
+        color: #AAAAAA;
+    }
+    .mini-note {
+        color: #999;
+        font-size: 0.92rem;
+    }
+    div[data-testid="stMetricValue"] {
+        font-size: 1.45rem;
     }
     </style>
     """,
@@ -549,300 +135,838 @@ st.markdown(
 )
 
 
-# =====================================================
-# 十八、讀取單字資料
-# =====================================================
-# 呼叫前面的 load_words() 函式。
-# 如果讀取成功，words_df 會是一個 pandas DataFrame。
+# ============================================================
+# 4. 小工具函式
+# ============================================================
+
+def safe_str(value) -> str:
+    """把任何資料安全轉成字串，避免 NaN 或 None 造成顯示錯誤。"""
+    if pd.isna(value):
+        return ""
+    return str(value).strip()
+
+
+def make_word_id(row: pd.Series) -> str:
+    """
+    建立單字的唯一 ID。
+    因為 words.csv 可能沒有 word_id 欄位，所以用年級、學期、課次、單字組合。
+    之後如果同一個字出現在不同課，也能分開記錄。
+    """
+    parts = [
+        safe_str(row.get("grade", "")),
+        safe_str(row.get("semester", "")),
+        safe_str(row.get("lesson", "")),
+        safe_str(row.get("word", "")),
+    ]
+    raw_id = "|".join(parts)
+    return hashlib.md5(raw_id.encode("utf-8")).hexdigest()
+
+
+def text_to_audio_filename(text: str) -> Path:
+    """
+    根據文字內容產生固定音檔檔名。
+    這樣同一句話不會重複產生音檔。
+    """
+    text_hash = hashlib.md5(text.encode("utf-8")).hexdigest()
+    return AUDIO_DIR / f"{text_hash}.mp3"
+
+
+async def _create_audio_async(text: str, output_path: Path):
+    """使用 edge-tts 非同步產生 mp3。"""
+    import edge_tts
+    communicate = edge_tts.Communicate(text=text, voice=VOICE)
+    await communicate.save(str(output_path))
+
+
+def get_audio_file(text: str) -> Path | None:
+    """
+    取得文字的發音檔。
+    如果音檔不存在，就自動產生。
+    """
+    text = safe_str(text)
+    if not text:
+        return None
+
+    output_path = text_to_audio_filename(text)
+
+    if output_path.exists():
+        return output_path
+
+    try:
+        asyncio.run(_create_audio_async(text, output_path))
+        return output_path
+    except RuntimeError:
+        # 某些執行環境 event loop 已存在時，改用新的 event loop
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        loop.run_until_complete(_create_audio_async(text, output_path))
+        loop.close()
+        return output_path
+    except Exception as e:
+        st.warning(f"產生發音失敗：{e}")
+        return None
+
+
+def autoplay_audio(audio_path: Path):
+    """
+    自動播放音檔。
+    Streamlit 原生 st.audio 需要再按播放鈕。
+    這裡用 HTML audio autoplay，讓單字卡切換時自動播放一次。
+    """
+    if audio_path is None or not audio_path.exists():
+        return
+
+    audio_bytes = audio_path.read_bytes()
+    audio_base64 = base64.b64encode(audio_bytes).decode()
+
+    audio_html = f"""
+    <audio autoplay>
+        <source src="data:audio/mp3;base64,{audio_base64}" type="audio/mp3">
+    </audio>
+    """
+    st.markdown(audio_html, unsafe_allow_html=True)
+
+
+def audio_button(text: str, label: str, key: str):
+    """
+    顯示手動播放按鈕。
+    雖然單字卡會自動播放單字，但保留按鈕方便重聽。
+    """
+    if st.button(label, key=key):
+        audio_path = get_audio_file(text)
+        autoplay_audio(audio_path)
+
+
+def show_info_table(rows: list[tuple[str, str]]):
+    """
+    用表格顯示資料。
+    rows 格式：[("欄位名稱", "內容"), ...]
+    空內容不顯示。
+    """
+    clean_rows = [(k, v) for k, v in rows if safe_str(v)]
+    if not clean_rows:
+        return
+
+    df = pd.DataFrame(clean_rows, columns=["項目", "內容"])
+    st.dataframe(df, hide_index=True, use_container_width=True)
+
+
+# ============================================================
+# 5. 讀取 words.csv
+# ============================================================
+
+@st.cache_data
+def load_words() -> pd.DataFrame:
+    """
+    讀取 words.csv。
+    @st.cache_data 的意思是資料沒有變時，Streamlit 不會每次重跑都重新讀檔。
+    """
+    if not DATA_PATH.exists():
+        st.error("找不到 words.csv，請確認 words.csv 和 app.py 放在同一個資料夾。")
+        return pd.DataFrame()
+
+    df = pd.read_csv(DATA_PATH)
+    df = df.fillna("")
+
+    # 必要欄位：程式至少需要這些欄位才能運作
+    required_columns = [
+        "word", "meaning", "pos", "grade", "semester", "lesson"
+    ]
+
+    missing_columns = [col for col in required_columns if col not in df.columns]
+    if missing_columns:
+        st.error(f"words.csv 缺少必要欄位：{', '.join(missing_columns)}")
+        return pd.DataFrame()
+
+    # 若沒有 pos_en / pos_zh，也可以用 pos 先補上，避免程式中斷
+    if "pos_en" not in df.columns:
+        df["pos_en"] = df["pos"]
+    if "pos_zh" not in df.columns:
+        df["pos_zh"] = df["pos"]
+
+    # 補上第二階段需要的 word_id
+    df["word_id"] = df.apply(make_word_id, axis=1)
+
+    return df
+
+
 words_df = load_words()
 
-# 頁面主標題與說明文字。
-st.title("📘 女兒專用英文單字複習")
-st.caption("第一階段強化版：表格化單字卡 + 單字與例句發音")
-
-# 如果資料是空的，停止執行後面的程式。
 if words_df.empty:
     st.stop()
 
 
-# =====================================================
-# 十九、側邊欄：範圍篩選
-# =====================================================
-# st.sidebar 代表左側邊欄。
+# ============================================================
+# 6. SQLite 資料庫：建立與讀寫學習紀錄
+# ============================================================
+
+def get_conn():
+    """連線到 SQLite 資料庫。"""
+    return sqlite3.connect(DB_PATH)
+
+
+def init_db():
+    """
+    建立學習紀錄資料表。
+    如果 progress.db 不存在，會自動建立。
+    """
+    conn = get_conn()
+    cur = conn.cursor()
+
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS progress (
+            word_id TEXT PRIMARY KEY,
+            word TEXT,
+            grade TEXT,
+            semester TEXT,
+            lesson TEXT,
+            status TEXT DEFAULT '未學',
+            mastery INTEGER DEFAULT 0,
+            review_count INTEGER DEFAULT 0,
+            correct_count INTEGER DEFAULT 0,
+            wrong_count INTEGER DEFAULT 0,
+            streak_correct INTEGER DEFAULT 0,
+            last_review TEXT,
+            next_review TEXT,
+            updated_at TEXT
+        )
+        """
+    )
+
+    conn.commit()
+    conn.close()
+
+
+def ensure_progress_for_words(df: pd.DataFrame):
+    """
+    確保 words.csv 裡每一個單字，在 progress.db 都有一筆紀錄。
+    """
+    conn = get_conn()
+    cur = conn.cursor()
+
+    for _, row in df.iterrows():
+        cur.execute(
+            """
+            INSERT OR IGNORE INTO progress
+            (word_id, word, grade, semester, lesson, status, mastery, review_count,
+             correct_count, wrong_count, streak_correct, last_review, next_review, updated_at)
+            VALUES (?, ?, ?, ?, ?, '未學', 0, 0, 0, 0, 0, NULL, NULL, ?)
+            """,
+            (
+                row["word_id"],
+                safe_str(row.get("word", "")),
+                safe_str(row.get("grade", "")),
+                safe_str(row.get("semester", "")),
+                safe_str(row.get("lesson", "")),
+                datetime.now().isoformat(timespec="seconds"),
+            ),
+        )
+
+    conn.commit()
+    conn.close()
+
+
+def load_progress() -> pd.DataFrame:
+    """讀取全部學習紀錄。"""
+    conn = get_conn()
+    df = pd.read_sql_query("SELECT * FROM progress", conn)
+    conn.close()
+    return df
+
+
+def get_progress(word_id: str) -> dict:
+    """讀取單一單字的學習紀錄。"""
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM progress WHERE word_id = ?", (word_id,))
+    row = cur.fetchone()
+    columns = [desc[0] for desc in cur.description] if cur.description else []
+    conn.close()
+
+    if row is None:
+        return {}
+
+    return dict(zip(columns, row))
+
+
+def calculate_review_result(level: str, current_progress: dict) -> dict:
+    """
+    根據使用者按下的熟悉程度，計算新的學習紀錄。
+
+    level 可為：
+    - forgot：忘記了
+    - hard：不熟
+    - good：認識
+    - easy：很熟
+    """
+    today = date.today()
+
+    mastery = int(current_progress.get("mastery") or 0)
+    review_count = int(current_progress.get("review_count") or 0)
+    correct_count = int(current_progress.get("correct_count") or 0)
+    wrong_count = int(current_progress.get("wrong_count") or 0)
+    streak_correct = int(current_progress.get("streak_correct") or 0)
+
+    review_count += 1
+
+    if level == "forgot":
+        mastery = max(0, mastery - 20)
+        wrong_count += 1
+        streak_correct = 0
+        next_days = 1
+        status = "學習中"
+
+    elif level == "hard":
+        mastery = min(100, mastery + 5)
+        correct_count += 1
+        streak_correct += 1
+        next_days = 2
+        status = "學習中"
+
+    elif level == "good":
+        mastery = min(100, mastery + 15)
+        correct_count += 1
+        streak_correct += 1
+        next_days = 4
+        status = "熟悉"
+
+    elif level == "easy":
+        mastery = min(100, mastery + 25)
+        correct_count += 1
+        streak_correct += 1
+
+        # 連續答對越多，複習間隔越長
+        if streak_correct >= 5:
+            next_days = 30
+            status = "已掌握"
+        elif streak_correct >= 3:
+            next_days = 14
+            status = "熟悉"
+        else:
+            next_days = 7
+            status = "熟悉"
+
+    else:
+        next_days = 1
+        status = "學習中"
+
+    next_review = today + timedelta(days=next_days)
+
+    return {
+        "status": status,
+        "mastery": mastery,
+        "review_count": review_count,
+        "correct_count": correct_count,
+        "wrong_count": wrong_count,
+        "streak_correct": streak_correct,
+        "last_review": today.isoformat(),
+        "next_review": next_review.isoformat(),
+        "updated_at": datetime.now().isoformat(timespec="seconds"),
+    }
+
+
+def update_progress(word_row: pd.Series, level: str):
+    """
+    更新單一單字的學習紀錄。
+    """
+    word_id = safe_str(word_row["word_id"])
+    current_progress = get_progress(word_id)
+    result = calculate_review_result(level, current_progress)
+
+    conn = get_conn()
+    cur = conn.cursor()
+
+    cur.execute(
+        """
+        UPDATE progress
+        SET
+            word = ?,
+            grade = ?,
+            semester = ?,
+            lesson = ?,
+            status = ?,
+            mastery = ?,
+            review_count = ?,
+            correct_count = ?,
+            wrong_count = ?,
+            streak_correct = ?,
+            last_review = ?,
+            next_review = ?,
+            updated_at = ?
+        WHERE word_id = ?
+        """,
+        (
+            safe_str(word_row.get("word", "")),
+            safe_str(word_row.get("grade", "")),
+            safe_str(word_row.get("semester", "")),
+            safe_str(word_row.get("lesson", "")),
+            result["status"],
+            result["mastery"],
+            result["review_count"],
+            result["correct_count"],
+            result["wrong_count"],
+            result["streak_correct"],
+            result["last_review"],
+            result["next_review"],
+            result["updated_at"],
+            word_id,
+        ),
+    )
+
+    conn.commit()
+    conn.close()
+
+
+# 初始化資料庫
+init_db()
+ensure_progress_for_words(words_df)
+
+
+# ============================================================
+# 7. 合併單字資料與學習紀錄
+# ============================================================
+
+progress_df = load_progress()
+merged_df = words_df.merge(progress_df, on="word_id", how="left", suffixes=("", "_progress"))
+
+# 避免空值造成錯誤
+merged_df = merged_df.fillna("")
+
+
+# ============================================================
+# 8. 側邊欄：學習範圍與模式
+# ============================================================
+
 st.sidebar.header("📚 選擇學習範圍")
 
-# 從完整單字表複製一份，後面會逐步篩選。
-filtered_df = words_df.copy()
+# 學習模式
+mode = st.sidebar.radio(
+    "學習模式",
+    ["全部單字", "今日複習", "未學單字", "學習中", "已掌握"],
+    index=0
+)
 
-# 年級篩選。
-selected_grade = st.sidebar.selectbox("年級", option_list(filtered_df, "grade"))
+filtered_df = merged_df.copy()
+
+# 年級篩選
+grade_options = ["全部"] + sorted([x for x in filtered_df["grade"].unique().tolist() if safe_str(x)])
+selected_grade = st.sidebar.selectbox("年級", grade_options)
+
 if selected_grade != "全部":
     filtered_df = filtered_df[filtered_df["grade"] == selected_grade]
 
-# 學期篩選。注意：選項會根據前面的年級篩選結果產生。
-selected_semester = st.sidebar.selectbox("學期", option_list(filtered_df, "semester"))
+# 學期篩選
+semester_options = ["全部"] + sorted([x for x in filtered_df["semester"].unique().tolist() if safe_str(x)])
+selected_semester = st.sidebar.selectbox("學期", semester_options)
+
 if selected_semester != "全部":
     filtered_df = filtered_df[filtered_df["semester"] == selected_semester]
 
-# 課次篩選。
-selected_lesson = st.sidebar.selectbox("課次", option_list(filtered_df, "lesson"))
+# 課次篩選
+lesson_options = ["全部"] + sorted([x for x in filtered_df["lesson"].unique().tolist() if safe_str(x)])
+selected_lesson = st.sidebar.selectbox("課次", lesson_options)
+
 if selected_lesson != "全部":
     filtered_df = filtered_df[filtered_df["lesson"] == selected_lesson]
 
-# 詞性篩選。這裡使用 pos_zh，所以女兒看到的是中文詞性。
-selected_pos = st.sidebar.selectbox("詞性", option_list(filtered_df, "pos_zh"))
+# 詞性篩選
+pos_options = ["全部"] + sorted([x for x in filtered_df["pos_zh"].unique().tolist() if safe_str(x)])
+selected_pos = st.sidebar.selectbox("詞性", pos_options)
+
 if selected_pos != "全部":
     filtered_df = filtered_df[filtered_df["pos_zh"] == selected_pos]
 
-# 關鍵字搜尋。
+# 搜尋功能
 keyword = st.sidebar.text_input("搜尋單字、中文、例句、用法或標籤")
-if keyword.strip():
-    kw = keyword.strip()
 
-    # 設定要搜尋的欄位。
-    search_cols = [
-        "word", "meaning", "pos", "pos_zh", "pos_note", "base_form",
-        "past", "past_participle", "present_participle", "transitivity",
-        "plural", "plural_rule", "required_prepositions", "usage_patterns",
-        "example_1", "example_zh_1", "example_2", "example_zh_2",
-        "example_3", "example_zh_3", "example_4", "example_zh_4",
-        "example_5", "example_zh_5", "tags", "note"
+if keyword.strip():
+    keyword = keyword.strip().lower()
+
+    search_columns = [
+        "word", "meaning", "pos", "pos_zh", "tags", "note",
+        "required_prepositions", "usage_patterns",
+        "example_1", "example_2", "example_3", "example_4", "example_5",
+        "example_zh_1", "example_zh_2", "example_zh_3", "example_zh_4", "example_zh_5"
     ]
 
-    # 只留下任一欄位包含關鍵字的資料。
-    filtered_df = filtered_df[contains_any_column(filtered_df, kw, search_cols)]
+    # 只搜尋實際存在的欄位
+    search_columns = [col for col in search_columns if col in filtered_df.columns]
+
+    mask = False
+    for col in search_columns:
+        mask = mask | filtered_df[col].astype(str).str.lower().str.contains(keyword, na=False)
+
+    filtered_df = filtered_df[mask]
+
+# 依模式篩選
+today_str = date.today().isoformat()
+
+if mode == "今日複習":
+    # 今日複習包含：
+    # 1. next_review 是空的：還沒學過
+    # 2. next_review 小於等於今天：到期該複習
+    filtered_df = filtered_df[
+        (filtered_df["next_review"].astype(str) == "") |
+        (filtered_df["next_review"].astype(str) <= today_str)
+    ]
+
+elif mode == "未學單字":
+    filtered_df = filtered_df[filtered_df["status"].astype(str).isin(["", "未學"])]
+
+elif mode == "學習中":
+    filtered_df = filtered_df[filtered_df["status"].astype(str).isin(["學習中", "熟悉"])]
+
+elif mode == "已掌握":
+    filtered_df = filtered_df[filtered_df["status"].astype(str) == "已掌握"]
 
 
-# =====================================================
-# 二十、主畫面：篩選摘要
-# =====================================================
-st.markdown(
-    f"目前範圍：**{selected_grade}** / **{selected_semester}** / **{selected_lesson}** / **{selected_pos}**　　"
-    f"共 **{len(filtered_df)}** 個單字"
+# ============================================================
+# 9. 側邊欄：學習統計
+# ============================================================
+
+st.sidebar.divider()
+st.sidebar.header("📊 學習統計")
+
+total_words = len(merged_df)
+not_started = len(merged_df[merged_df["status"].astype(str).isin(["", "未學"])])
+learning = len(merged_df[merged_df["status"].astype(str).isin(["學習中", "熟悉"])])
+mastered = len(merged_df[merged_df["status"].astype(str) == "已掌握"])
+
+due_today = len(
+    merged_df[
+        (merged_df["next_review"].astype(str) == "") |
+        (merged_df["next_review"].astype(str) <= today_str)
+    ]
 )
 
-# 如果篩選後沒有資料，就提示並停止。
+st.sidebar.write(f"全部單字：**{total_words}**")
+st.sidebar.write(f"今日可複習：**{due_today}**")
+st.sidebar.write(f"未學：**{not_started}**")
+st.sidebar.write(f"學習中 / 熟悉：**{learning}**")
+st.sidebar.write(f"已掌握：**{mastered}**")
+
+
+# ============================================================
+# 10. 主畫面標題與統計卡
+# ============================================================
+
+st.markdown('<div class="main-title">📘 國中英文單字複習</div>', unsafe_allow_html=True)
+st.markdown(
+    '<div class="small-caption">第二階段：單字卡 + 自動發音 + SQLite 學習紀錄 + 簡化記憶曲線</div>',
+    unsafe_allow_html=True
+)
+
+metric_col1, metric_col2, metric_col3, metric_col4 = st.columns(4)
+metric_col1.metric("目前範圍單字", len(filtered_df))
+metric_col2.metric("今日可複習", due_today)
+metric_col3.metric("學習中", learning)
+metric_col4.metric("已掌握", mastered)
+
+st.caption(
+    f"目前範圍：{selected_grade} / {selected_semester} / {selected_lesson} / {selected_pos}　｜　模式：{mode}"
+)
+
 if filtered_df.empty:
-    st.warning("這個範圍目前沒有單字，請調整篩選條件。")
+    st.warning("目前範圍沒有單字，請調整左側篩選條件。")
     st.stop()
 
-# 重設索引，讓第 0、1、2 筆資料可以對應單字卡順序。
-filtered_df = filtered_df.reset_index(drop=True)
 
+# ============================================================
+# 11. 單字卡索引控制
+# ============================================================
 
-# =====================================================
-# 二十一、使用 session_state 記住目前卡片位置
-# =====================================================
-# Streamlit 每次按按鈕都會重新執行整個程式。
-# 如果不用 st.session_state，card_index 每次都會變回 0。
-# 所以用 st.session_state.card_index 記住目前看到第幾張卡。
+# 每次篩選結果改變時，讓單字卡回到第一張
+filter_signature = hashlib.md5(
+    "|".join([
+        mode, selected_grade, selected_semester, selected_lesson, selected_pos, keyword
+    ]).encode("utf-8")
+).hexdigest()
 
-# filter_key 用來判斷篩選條件是否改變。
-filter_key = f"{selected_grade}|{selected_semester}|{selected_lesson}|{selected_pos}|{keyword}"
+if "last_filter_signature" not in st.session_state:
+    st.session_state.last_filter_signature = filter_signature
 
-# 第一次執行時建立 last_filter_key。
-if "last_filter_key" not in st.session_state:
-    st.session_state.last_filter_key = filter_key
-
-# 如果篩選條件改變，就回到第一張單字卡。
-if st.session_state.last_filter_key != filter_key:
+if st.session_state.last_filter_signature != filter_signature:
     st.session_state.card_index = 0
-    st.session_state.last_filter_key = filter_key
+    st.session_state.last_filter_signature = filter_signature
 
-# 第一次執行時建立 card_index。
 if "card_index" not in st.session_state:
     st.session_state.card_index = 0
 
-# 如果目前索引超過篩選後資料筆數，就回到第一張。
 if st.session_state.card_index >= len(filtered_df):
     st.session_state.card_index = 0
 
-
-# =====================================================
-# 二十二、取得目前單字資料
-# =====================================================
-current = filtered_df.iloc[st.session_state.card_index]
-
-# 取出常用欄位，先用 clean_text 清理。
-word = clean_text(current.get("word", ""))
-meaning = clean_text(current.get("meaning", ""))
-pos = clean_text(current.get("pos", ""))
-pos_en = clean_text(current.get("pos_en", ""))
-pos_zh = clean_text(current.get("pos_zh", ""))
-pos_note = clean_text(current.get("pos_note", ""))
-
-# base_form 是原形。如果空白，就用 word 當原形。
-base_form = clean_text(current.get("base_form", word)) or word
+filtered_df = filtered_df.reset_index(drop=True)
+current_word = filtered_df.iloc[st.session_state.card_index]
 
 
-# =====================================================
-# 二十三、主畫面：左右欄版面
-# =====================================================
-# st.columns 可以把畫面分成多欄。
-# [1.05, 1.6] 表示左欄稍窄、右欄較寬。
-st.divider()
-left, right = st.columns([1.05, 1.6], vertical_alignment="top")
+# ============================================================
+# 12. 自動播放控制
+# ============================================================
+
+# 只在切換到新單字時，自動播放單字一次
+current_word_id = safe_str(current_word["word_id"])
+
+if "last_autoplay_word_id" not in st.session_state:
+    st.session_state.last_autoplay_word_id = ""
+
+if st.session_state.last_autoplay_word_id != current_word_id:
+    word_audio = get_audio_file(safe_str(current_word["word"]))
+    autoplay_audio(word_audio)
+    st.session_state.last_autoplay_word_id = current_word_id
 
 
-# =====================================================
-# 二十四、左欄：單字卡與上一個/下一個
-# =====================================================
-with left:
-    # 用 HTML 做單字卡外觀。
+# ============================================================
+# 13. 單字卡：左右兩欄
+# ============================================================
+
+left_col, right_col = st.columns([0.92, 1.35], gap="large")
+
+with left_col:
+    st.markdown('<div class="word-card">', unsafe_allow_html=True)
+
     st.markdown(
         f"""
-        <div class='word-card'>
-            <div class='word-title'>{word}</div>
-            <div class='meaning-title'>{meaning}</div>
-            <div class='small-note'>{pos or pos_zh}</div>
-        </div>
+        <div class="word-text">{html.escape(safe_str(current_word["word"]))}</div>
+        <div class="meaning-text">{html.escape(safe_str(current_word["meaning"]))}</div>
         """,
         unsafe_allow_html=True
     )
 
-    # 單字發音按鈕。
-    speak_button(word, "🔊 單字發音", f"word_audio_{st.session_state.card_index}_{word}")
+    st.write("")
+    audio_button(safe_str(current_word["word"]), "🔊 重聽單字", key=f"word_audio_{current_word_id}")
 
-    # 如果是動詞，且原形和目前單字不同，就另外提供原形發音。
-    # 例如 am / are / is 的原形都是 be。
-    if pos_en == "verb" and base_form and base_form != word:
-        speak_button(base_form, "🔊 原形發音", f"base_audio_{st.session_state.card_index}_{base_form}")
+    st.divider()
 
-    # 顯示目前第幾張。
-    st.write(f"第 {st.session_state.card_index + 1} / {len(filtered_df)} 個")
+    st.write(f"**詞性：** {safe_str(current_word.get('pos', ''))}")
 
-    # 上一個 / 下一個按鈕並排顯示。
-    c1, c2 = st.columns(2)
-    with c1:
+    if safe_str(current_word.get("pos_note", "")):
+        st.caption(safe_str(current_word.get("pos_note", "")))
+
+    # 學習狀態顯示
+    progress = get_progress(current_word_id)
+
+    st.markdown('<div class="section-title">學習狀態</div>', unsafe_allow_html=True)
+
+    progress_rows = [
+        ("狀態", safe_str(progress.get("status", "未學"))),
+        ("熟練度", f"{progress.get('mastery', 0)} / 100"),
+        ("複習次數", str(progress.get("review_count", 0))),
+        ("答對次數", str(progress.get("correct_count", 0))),
+        ("答錯次數", str(progress.get("wrong_count", 0))),
+        ("連續答對", str(progress.get("streak_correct", 0))),
+        ("上次複習", safe_str(progress.get("last_review", ""))),
+        ("下次複習", safe_str(progress.get("next_review", ""))),
+    ]
+    show_info_table(progress_rows)
+
+    st.markdown('<div class="section-title">我對這個字的熟悉度</div>', unsafe_allow_html=True)
+
+    b1, b2 = st.columns(2)
+    b3, b4 = st.columns(2)
+
+    with b1:
+        if st.button("😵 忘記了", use_container_width=True, key=f"forgot_{current_word_id}"):
+            update_progress(current_word, "forgot")
+            st.success("已記錄：忘記了。明天會再複習。")
+            st.rerun()
+
+    with b2:
+        if st.button("😐 不熟", use_container_width=True, key=f"hard_{current_word_id}"):
+            update_progress(current_word, "hard")
+            st.success("已記錄：不熟。2 天後會再複習。")
+            st.rerun()
+
+    with b3:
+        if st.button("🙂 認識", use_container_width=True, key=f"good_{current_word_id}"):
+            update_progress(current_word, "good")
+            st.success("已記錄：認識。4 天後會再複習。")
+            st.rerun()
+
+    with b4:
+        if st.button("😄 很熟", use_container_width=True, key=f"easy_{current_word_id}"):
+            update_progress(current_word, "easy")
+            st.success("已記錄：很熟。會延後複習。")
+            st.rerun()
+
+    st.divider()
+
+    nav1, nav2, nav3 = st.columns([1, 1.2, 1])
+
+    with nav1:
         if st.button("⬅️ 上一個", use_container_width=True):
-            # 使用 % 可以做到循環：第一張按上一個會跳到最後一張。
-            st.session_state.card_index = (st.session_state.card_index - 1) % len(filtered_df)
+            st.session_state.card_index -= 1
+            if st.session_state.card_index < 0:
+                st.session_state.card_index = len(filtered_df) - 1
             st.rerun()
 
-    with c2:
+    with nav2:
+        st.write(f"第 {st.session_state.card_index + 1} / {len(filtered_df)} 個")
+
+    with nav3:
         if st.button("下一個 ➡️", use_container_width=True):
-            # 最後一張按下一個會跳回第一張。
-            st.session_state.card_index = (st.session_state.card_index + 1) % len(filtered_df)
+            st.session_state.card_index += 1
+            if st.session_state.card_index >= len(filtered_df):
+                st.session_state.card_index = 0
             st.rerun()
 
+    st.markdown('</div>', unsafe_allow_html=True)
 
-# =====================================================
-# 二十五、右欄：基本資料、動詞資料、用法
-# =====================================================
-with right:
-    # 基本資料表。
-    section_title("基本資料")
-    info_table([
-        ("詞性", pos or pos_zh),
-        ("詞性說明", pos_note),
-        ("年級", current.get("grade", "")),
-        ("課次", current.get("lesson", "")),
-    ])
 
-    # 如果是動詞，就顯示動詞資料。
-    if pos_en == "verb":
-        section_title("動詞資料")
-        past = clean_text(current.get("past", ""))
-        past_participle = clean_text(current.get("past_participle", ""))
-        present_participle = clean_text(current.get("present_participle", ""))
+with right_col:
+    # 基本資料
+    st.markdown('<div class="section-title">基本資料</div>', unsafe_allow_html=True)
 
-        info_table([
+    basic_rows = [
+        ("年級", safe_str(current_word.get("grade", ""))),
+        ("學期", safe_str(current_word.get("semester", ""))),
+        ("課次", safe_str(current_word.get("lesson", ""))),
+        ("標籤", safe_str(current_word.get("tags", ""))),
+        ("補充說明", safe_str(current_word.get("note", ""))),
+    ]
+    show_info_table(basic_rows)
+
+    # 動詞資料
+    pos_en = safe_str(current_word.get("pos_en", "")).lower()
+    pos = safe_str(current_word.get("pos", "")).lower()
+
+    is_verb = ("verb" in pos_en) or ("verb" in pos) or ("動詞" in safe_str(current_word.get("pos_zh", "")))
+
+    if is_verb:
+        st.markdown('<div class="section-title">動詞資料</div>', unsafe_allow_html=True)
+
+        base_form = safe_str(current_word.get("base_form", ""))
+        if not base_form:
+            base_form = safe_str(current_word.get("word", ""))
+
+        verb_rows = [
             ("原形", base_form),
-            ("過去式", past),
-            ("過去分詞", past_participle),
-            ("現在分詞", present_participle),
-            ("及物／不及物", current.get("transitivity", "")),
-        ])
+            ("過去式", safe_str(current_word.get("past", ""))),
+            ("過去分詞", safe_str(current_word.get("past_participle", ""))),
+            ("現在分詞", safe_str(current_word.get("present_participle", ""))),
+            ("及物 / 不及物", safe_str(current_word.get("transitivity", ""))),
+        ]
+        show_info_table(verb_rows)
 
-    # 名詞複數資料。不是每個詞都有，所以有資料才顯示。
-    plural = clean_text(current.get("plural", ""))
-    plural_rule = clean_text(current.get("plural_rule", ""))
+        if base_form:
+            audio_button(base_form, "🔊 原形發音", key=f"base_audio_{current_word_id}")
+
+    # 名詞複數資料
+    plural = safe_str(current_word.get("plural", ""))
+    plural_rule = safe_str(current_word.get("plural_rule", ""))
+
     if plural or plural_rule:
-        section_title("名詞複數")
-        info_table([
+        st.markdown('<div class="section-title">名詞 / 數字用法</div>', unsafe_allow_html=True)
+
+        noun_rows = [
             ("複數形", plural),
             ("複數規則", plural_rule),
-        ])
+        ]
+        show_info_table(noun_rows)
 
-    # 常用介系詞和句型。
-    required_prepositions = clean_text(current.get("required_prepositions", ""))
-    usage_patterns = clean_text(current.get("usage_patterns", ""))
+    # 常用用法
+    required_prepositions = safe_str(current_word.get("required_prepositions", ""))
+    usage_patterns = safe_str(current_word.get("usage_patterns", ""))
+
     if required_prepositions or usage_patterns:
-        section_title("常用用法")
-        info_table([
-            ("搭配介系詞", required_prepositions),
-            ("常用句型", usage_patterns),
-        ], columns=1)
+        st.markdown('<div class="section-title">常用用法</div>', unsafe_allow_html=True)
+
+        usage_rows = [
+            ("常搭配介系詞", required_prepositions),
+            ("常用句型 / 用法", usage_patterns),
+        ]
+        show_info_table(usage_rows)
 
 
-# =====================================================
-# 二十六、例句區：兩欄排列 + 例句發音
-# =====================================================
-section_title("例句與發音")
+# ============================================================
+# 14. 例句：兩欄排列，每句可播放
+# ============================================================
 
-# 收集目前單字的例句。
+st.divider()
+st.markdown('<div class="section-title">例句</div>', unsafe_allow_html=True)
+
 examples = []
+
 for i in range(1, 6):
-    ex = clean_text(current.get(f"example_{i}", ""))
-    ex_zh = clean_text(current.get(f"example_zh_{i}", ""))
-    if ex:
-        examples.append((i, ex, ex_zh))
+    en_col = f"example_{i}"
+    zh_col = f"example_zh_{i}"
+
+    en_text = safe_str(current_word.get(en_col, ""))
+    zh_text = safe_str(current_word.get(zh_col, ""))
+
+    if en_text:
+        examples.append((i, en_text, zh_text))
 
 if not examples:
-    st.write("目前尚未建立例句。")
-else:
-    # 每兩個例句一排。
-    for idx in range(0, len(examples), 2):
-        cols = st.columns(2)
+    # 如果新欄位沒有例句，退回舊版 example / example_zh
+    old_en = safe_str(current_word.get("example", ""))
+    old_zh = safe_str(current_word.get("example_zh", ""))
+    if old_en:
+        examples.append((1, old_en, old_zh))
 
-        # zip(cols, examples[idx:idx + 2])：把欄位和例句配對。
-        for col, item in zip(cols, examples[idx:idx + 2]):
-            i, ex, ex_zh = item
-            with col:
-                st.markdown(
-                    f"""
-                    <div class='example-box'>
-                        <div class='example-en'>{i}. {ex}</div>
-                        <div class='example-zh'>{ex_zh}</div>
-                    </div>
-                    """,
-                    unsafe_allow_html=True
-                )
+# 例句自動播放：切換單字後，自動播放第一句例句一次
+if examples:
+    first_example_text = examples[0][1]
+    if "last_autoplay_example_id" not in st.session_state:
+        st.session_state.last_autoplay_example_id = ""
 
-                # 每一句例句都有自己的發音按鈕。
-                speak_button(ex, "🔊 例句發音", f"example_audio_{st.session_state.card_index}_{i}")
+    example_autoplay_id = f"{current_word_id}|{first_example_text}"
 
+    if st.session_state.last_autoplay_example_id != example_autoplay_id:
+        example_audio = get_audio_file(first_example_text)
+        autoplay_audio(example_audio)
+        st.session_state.last_autoplay_example_id = example_autoplay_id
 
-# =====================================================
-# 二十七、補充資料
-# =====================================================
-section_title("補充")
-info_table([
-    ("標籤", current.get("tags", "")),
-    ("補充說明", current.get("note", "")),
-], columns=1)
+example_cols = st.columns(2)
+
+for idx, (num, en_text, zh_text) in enumerate(examples):
+    with example_cols[idx % 2]:
+        st.markdown('<div class="example-box">', unsafe_allow_html=True)
+        st.markdown(f'<div class="example-en">{num}. {html.escape(en_text)}</div>', unsafe_allow_html=True)
+        if zh_text:
+            st.markdown(f'<div class="example-zh">{html.escape(zh_text)}</div>', unsafe_allow_html=True)
+        audio_button(en_text, f"🔊 播放例句 {num}", key=f"example_audio_{current_word_id}_{num}")
+        st.markdown('</div>', unsafe_allow_html=True)
 
 
-# =====================================================
-# 二十八、目前範圍單字清單
-# =====================================================
-# st.expander：可展開/收合的區塊。
-with st.expander("查看目前範圍的單字清單"):
-    list_cols = [
-        "word", "meaning", "pos", "base_form", "past", "past_participle",
-        "present_participle", "transitivity", "plural", "plural_rule",
-        "required_prepositions", "usage_patterns", "grade", "semester", "lesson", "tags", "note"
+# ============================================================
+# 15. 目前範圍單字清單與進度表
+# ============================================================
+
+st.divider()
+
+with st.expander("查看目前範圍的單字與學習狀態"):
+    display_columns = [
+        "word", "meaning", "pos", "grade", "semester", "lesson",
+        "status", "mastery", "review_count", "correct_count", "wrong_count",
+        "last_review", "next_review"
     ]
 
-    # 只顯示目前 DataFrame 裡真的存在的欄位。
-    available_cols = [c for c in list_cols if c in filtered_df.columns]
+    display_columns = [col for col in display_columns if col in filtered_df.columns]
 
-    # st.dataframe：顯示互動式表格。
-    # hide_index=True：隱藏左邊的索引欄。
-    st.dataframe(filtered_df[available_cols], use_container_width=True, hide_index=True)
+    st.dataframe(
+        filtered_df[display_columns],
+        use_container_width=True,
+        hide_index=True
+    )
 
 
-# =====================================================
-# 二十九、頁尾提示
-# =====================================================
-st.caption("下一階段可加入：認識／不熟／忘記了、SQLite 學習紀錄、記憶曲線排程。")
+with st.expander("開發備註：第二階段目前完成內容"):
+    st.markdown(
+        """
+        第二階段目前已加入：
+
+        1. `progress.db`：自動建立 SQLite 學習紀錄資料庫  
+        2. 每個單字會記錄：狀態、熟練度、複習次數、答對、答錯、連續答對、上次複習、下次複習  
+        3. 單字卡上有四個熟悉度按鈕：忘記了、不熟、認識、很熟  
+        4. 依按鈕結果自動安排下次複習日期  
+        5. 側邊欄可以選「今日複習」、「未學單字」、「學習中」、「已掌握」  
+        6. 切換單字卡時，單字會自動播放一次，第一句例句也會自動播放一次  
+
+        下一步可以繼續做：
+
+        - 第三階段：基本測驗功能  
+        - 第四階段：錯題本  
+        - 第五階段：每日任務  
+        """
+    )
