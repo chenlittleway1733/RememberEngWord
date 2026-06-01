@@ -3,25 +3,28 @@ import pandas as pd
 from pathlib import Path
 import asyncio
 import hashlib
+import sqlite3
 from datetime import date, datetime, timedelta
 import base64
 import html
-import json
-
-import gspread
-from google.oauth2.service_account import Credentials
-
 
 # ============================================================
 # 國中英文單字智慧複習系統
-# app_v9.py
+# app_v10.py
 #
-# 本版重點：
-# 1. words.csv 仍然是單字資料來源
-# 2. Google Sheets 改成學習紀錄資料庫
-# 3. 支援三個使用者：女兒 / 兒子 / 測試帳
-# 4. 每個使用者有自己的學習進度
-# 5. 不再依賴 progress.db
+# 本版方向：
+# 回到 SQLite + 下載備份，不使用 Google Sheets。
+#
+# 目前功能：
+# 1. words.csv 作為單字資料來源
+# 2. progress.db 作為本機 / Streamlit 執行環境中的學習紀錄資料庫
+# 3. 支援三個使用者：女兒、兒子、測試帳
+# 4. 每位使用者的學習紀錄分開
+# 5. 單字卡、自動發音、例句發音
+# 6. 忘記了 / 不熟 / 認識 / 很熟
+# 7. 簡化記憶曲線
+# 8. 今日複習、未學單字、學習中、已掌握
+# 9. 下載 progress.db 與 CSV 備份
 # ============================================================
 
 
@@ -30,6 +33,7 @@ from google.oauth2.service_account import Credentials
 # ============================================================
 
 DATA_PATH = Path("words.csv")
+DB_PATH = Path("progress.db")
 
 AUDIO_DIR = Path("audio_cache")
 AUDIO_DIR.mkdir(exist_ok=True)
@@ -38,56 +42,14 @@ VOICE = "en-US-JennyNeural"
 
 
 # ============================================================
-# 2. Google Sheets 設定
-# ============================================================
-#
-# 這一版需要在 Streamlit Secrets 設定：
-#
-# [gcp_service_account]
-# type = "service_account"
-# project_id = "你的 project_id"
-# private_key_id = "你的 private_key_id"
-# private_key = "-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----\n"
-# client_email = "你的 service account email"
-# client_id = "你的 client_id"
-# auth_uri = "https://accounts.google.com/o/oauth2/auth"
-# token_uri = "https://oauth2.googleapis.com/token"
-# auth_provider_x509_cert_url = "https://www.googleapis.com/oauth2/v1/certs"
-# client_x509_cert_url = "..."
-#
-# google_sheet_id = "你的 Google Sheet ID"
-#
-# Google Sheet 裡會用到兩個工作表：
-# 1. users
-# 2. progress
+# 2. 使用者設定
 # ============================================================
 
-USER_HEADERS = ["user_id", "user_name", "role"]
-
-PROGRESS_HEADERS = [
-    "user_id",
-    "word_id",
-    "word",
-    "grade",
-    "semester",
-    "lesson",
-    "status",
-    "mastery",
-    "review_count",
-    "correct_count",
-    "wrong_count",
-    "streak_correct",
-    "last_review",
-    "next_review",
-    "updated_at",
-]
-
-
-DEFAULT_USERS = [
-    ["daughter", "女兒", "learner"],
-    ["son", "兒子", "learner"],
-    ["test", "測試帳", "test"],
-]
+USERS = {
+    "daughter": "女兒",
+    "son": "兒子",
+    "test": "測試帳",
+}
 
 
 # ============================================================
@@ -161,10 +123,6 @@ st.markdown(
         font-size: 0.95rem;
         color: #AAAAAA;
     }
-    .mini-note {
-        color: #999;
-        font-size: 0.92rem;
-    }
     div[data-testid="stMetricValue"] {
         font-size: 1.45rem;
     }
@@ -179,7 +137,7 @@ st.markdown(
 # ============================================================
 
 def safe_str(value) -> str:
-    """把資料安全轉成字串。"""
+    """把任何資料安全轉成字串。"""
     try:
         if pd.isna(value):
             return ""
@@ -189,7 +147,7 @@ def safe_str(value) -> str:
 
 
 def safe_int(value, default=0) -> int:
-    """把資料安全轉成整數。"""
+    """把任何資料安全轉成整數。"""
     try:
         if value is None or value == "":
             return default
@@ -201,7 +159,7 @@ def safe_int(value, default=0) -> int:
 def make_word_id(row: pd.Series) -> str:
     """
     建立單字唯一 ID。
-    用年級、學期、課次、單字組合，避免不同課出現同一單字時混在一起。
+    使用年級、學期、課次、單字組合。
     """
     parts = [
         safe_str(row.get("grade", "")),
@@ -214,20 +172,20 @@ def make_word_id(row: pd.Series) -> str:
 
 
 def text_to_audio_filename(text: str) -> Path:
-    """同一句文字對應同一個 mp3 檔名。"""
+    """同一句文字對應同一個音檔。"""
     text_hash = hashlib.md5(text.encode("utf-8")).hexdigest()
     return AUDIO_DIR / f"{text_hash}.mp3"
 
 
 async def _create_audio_async(text: str, output_path: Path):
-    """用 edge-tts 產生 mp3。"""
+    """使用 edge-tts 產生 mp3。"""
     import edge_tts
     communicate = edge_tts.Communicate(text=text, voice=VOICE)
     await communicate.save(str(output_path))
 
 
 def get_audio_file(text: str) -> Path | None:
-    """取得發音檔，沒有就自動產生。"""
+    """取得發音檔，若不存在就自動產生。"""
     text = safe_str(text)
     if not text:
         return None
@@ -251,7 +209,7 @@ def get_audio_file(text: str) -> Path | None:
         return None
 
 
-def autoplay_audio(audio_path: Path):
+def autoplay_audio(audio_path: Path | None):
     """自動播放音檔。"""
     if audio_path is None or not audio_path.exists():
         return
@@ -284,44 +242,13 @@ def show_info_table(rows: list[tuple[str, str]]):
     st.dataframe(df, hide_index=True, use_container_width=True)
 
 
-def normalize_progress_record(record: dict, user_id: str, word_row: pd.Series) -> dict:
-    """
-    把 Google Sheets 讀回來的資料補齊欄位。
-    如果某個單字還沒有紀錄，就建立預設紀錄。
-    """
-    base = {
-        "user_id": user_id,
-        "word_id": safe_str(word_row["word_id"]),
-        "word": safe_str(word_row.get("word", "")),
-        "grade": safe_str(word_row.get("grade", "")),
-        "semester": safe_str(word_row.get("semester", "")),
-        "lesson": safe_str(word_row.get("lesson", "")),
-        "status": "未學",
-        "mastery": "0",
-        "review_count": "0",
-        "correct_count": "0",
-        "wrong_count": "0",
-        "streak_correct": "0",
-        "last_review": "",
-        "next_review": "",
-        "updated_at": "",
-    }
-
-    if record:
-        for key in PROGRESS_HEADERS:
-            if key in record:
-                base[key] = safe_str(record.get(key, ""))
-
-    return base
-
-
 # ============================================================
 # 6. 讀取 words.csv
 # ============================================================
 
 @st.cache_data
 def load_words() -> pd.DataFrame:
-    """讀取單字表 words.csv。"""
+    """讀取單字表。"""
     if not DATA_PATH.exists():
         st.error("找不到 words.csv，請確認 words.csv 和 app.py 放在同一個資料夾。")
         return pd.DataFrame()
@@ -350,174 +277,147 @@ def load_words() -> pd.DataFrame:
 
 
 # ============================================================
-# 7. Google Sheets 連線與初始化
+# 7. SQLite 資料庫
 # ============================================================
 
-@st.cache_resource
-def get_google_client():
-    """
-    建立 Google Sheets API 連線。
-    使用 Streamlit Secrets 中的 gcp_service_account。
-    """
-    if "gcp_service_account" not in st.secrets:
-        st.error("尚未設定 Streamlit Secrets：缺少 [gcp_service_account]。")
-        st.stop()
+def get_conn():
+    """連線到 SQLite 資料庫。"""
+    return sqlite3.connect(DB_PATH)
 
-    scopes = [
-        "https://www.googleapis.com/auth/spreadsheets",
-        "https://www.googleapis.com/auth/drive",
-    ]
 
-    service_account_info = dict(st.secrets["gcp_service_account"])
+def init_db():
+    """建立 users 與 progress 資料表。"""
+    conn = get_conn()
+    cur = conn.cursor()
 
-    # private_key 在 toml 裡常需要處理換行
-    if "private_key" in service_account_info:
-        service_account_info["private_key"] = service_account_info["private_key"].replace("\\n", "\n")
-
-    credentials = Credentials.from_service_account_info(
-        service_account_info,
-        scopes=scopes
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS users (
+            user_id TEXT PRIMARY KEY,
+            user_name TEXT NOT NULL,
+            role TEXT DEFAULT 'learner',
+            created_at TEXT
+        )
+        """
     )
 
-    return gspread.authorize(credentials)
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS progress (
+            user_id TEXT NOT NULL,
+            word_id TEXT NOT NULL,
+            word TEXT,
+            grade TEXT,
+            semester TEXT,
+            lesson TEXT,
+            status TEXT DEFAULT '未學',
+            mastery INTEGER DEFAULT 0,
+            review_count INTEGER DEFAULT 0,
+            correct_count INTEGER DEFAULT 0,
+            wrong_count INTEGER DEFAULT 0,
+            streak_correct INTEGER DEFAULT 0,
+            last_review TEXT,
+            next_review TEXT,
+            updated_at TEXT,
+            PRIMARY KEY (user_id, word_id)
+        )
+        """
+    )
+
+    now = datetime.now().isoformat(timespec="seconds")
+    for user_id, user_name in USERS.items():
+        role = "test" if user_id == "test" else "learner"
+        cur.execute(
+            """
+            INSERT OR IGNORE INTO users (user_id, user_name, role, created_at)
+            VALUES (?, ?, ?, ?)
+            """,
+            (user_id, user_name, role, now)
+        )
+
+    conn.commit()
+    conn.close()
 
 
-@st.cache_resource
-def get_spreadsheet():
-    """開啟 Google Sheet。"""
-    if "google_sheet_id" not in st.secrets:
-        st.error("尚未設定 Streamlit Secrets：缺少 google_sheet_id。")
-        st.stop()
-
-    client = get_google_client()
-    sheet_id = st.secrets["google_sheet_id"]
-
-    try:
-        return client.open_by_key(sheet_id)
-    except Exception as e:
-        st.error(f"無法開啟 Google Sheet。請確認 google_sheet_id 正確，且已分享給 Service Account。錯誤：{e}")
-        st.stop()
-
-
-def get_or_create_worksheet(spreadsheet, title: str, headers: list[str], default_rows: list[list[str]] | None = None):
+def ensure_progress_for_words(df: pd.DataFrame):
     """
-    取得工作表；如果不存在就建立。
-    並確保第一列是指定欄位名稱。
+    確保每位使用者、每個單字，都有一筆 progress 紀錄。
     """
-    try:
-        ws = spreadsheet.worksheet(title)
-    except gspread.WorksheetNotFound:
-        ws = spreadsheet.add_worksheet(title=title, rows=1000, cols=max(20, len(headers)))
+    conn = get_conn()
+    cur = conn.cursor()
+    now = datetime.now().isoformat(timespec="seconds")
 
-    existing_values = ws.get_all_values()
+    for user_id in USERS.keys():
+        for _, row in df.iterrows():
+            cur.execute(
+                """
+                INSERT OR IGNORE INTO progress
+                (user_id, word_id, word, grade, semester, lesson, status, mastery,
+                 review_count, correct_count, wrong_count, streak_correct,
+                 last_review, next_review, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, '未學', 0, 0, 0, 0, 0, NULL, NULL, ?)
+                """,
+                (
+                    user_id,
+                    safe_str(row["word_id"]),
+                    safe_str(row.get("word", "")),
+                    safe_str(row.get("grade", "")),
+                    safe_str(row.get("semester", "")),
+                    safe_str(row.get("lesson", "")),
+                    now,
+                )
+            )
 
-    if not existing_values:
-        ws.update("A1", [headers])
-        if default_rows:
-            ws.append_rows(default_rows, value_input_option="USER_ENTERED")
+    conn.commit()
+    conn.close()
+
+
+def load_users() -> pd.DataFrame:
+    """讀取使用者資料。"""
+    conn = get_conn()
+    df = pd.read_sql_query("SELECT * FROM users ORDER BY user_id", conn)
+    conn.close()
+    return df
+
+
+def load_progress(user_id: str | None = None) -> pd.DataFrame:
+    """讀取學習紀錄。"""
+    conn = get_conn()
+
+    if user_id:
+        df = pd.read_sql_query(
+            "SELECT * FROM progress WHERE user_id = ?",
+            conn,
+            params=(user_id,)
+        )
     else:
-        first_row = existing_values[0]
-        if first_row[:len(headers)] != headers:
-            ws.update("A1", [headers])
+        df = pd.read_sql_query("SELECT * FROM progress", conn)
 
-    return ws
-
-
-@st.cache_data(ttl=20)
-def load_users_from_sheet() -> pd.DataFrame:
-    """讀取 users 工作表。ttl=20 表示最多快取 20 秒。"""
-    spreadsheet = get_spreadsheet()
-    ws = get_or_create_worksheet(spreadsheet, "users", USER_HEADERS, DEFAULT_USERS)
-
-    records = ws.get_all_records()
-    if not records:
-        ws.append_rows(DEFAULT_USERS, value_input_option="USER_ENTERED")
-        records = ws.get_all_records()
-
-    return pd.DataFrame(records)
+    conn.close()
+    return df
 
 
-@st.cache_data(ttl=20)
-def load_progress_from_sheet() -> pd.DataFrame:
-    """讀取 progress 工作表。"""
-    spreadsheet = get_spreadsheet()
-    ws = get_or_create_worksheet(spreadsheet, "progress", PROGRESS_HEADERS, None)
+def get_progress(user_id: str, word_id: str) -> dict:
+    """讀取某位使用者某個單字的學習紀錄。"""
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT * FROM progress WHERE user_id = ? AND word_id = ?",
+        (user_id, word_id)
+    )
+    row = cur.fetchone()
+    columns = [desc[0] for desc in cur.description] if cur.description else []
+    conn.close()
 
-    records = ws.get_all_records()
+    if row is None:
+        return {}
 
-    if not records:
-        return pd.DataFrame(columns=PROGRESS_HEADERS)
+    return dict(zip(columns, row))
 
-    df = pd.DataFrame(records)
-
-    for col in PROGRESS_HEADERS:
-        if col not in df.columns:
-            df[col] = ""
-
-    return df[PROGRESS_HEADERS]
-
-
-def clear_sheet_cache():
-    """更新 Google Sheet 後，清除快取，讓畫面讀到新資料。"""
-    load_progress_from_sheet.clear()
-    load_users_from_sheet.clear()
-
-
-def find_progress_row_number(ws, user_id: str, word_id: str) -> int | None:
-    """
-    在 progress 工作表中找出某個 user_id + word_id 的列號。
-    Google Sheets 的列號從 1 開始，第 1 列是標題，所以資料從第 2 列開始。
-    """
-    all_values = ws.get_all_values()
-
-    if len(all_values) <= 1:
-        return None
-
-    headers = all_values[0]
-    try:
-        user_col = headers.index("user_id")
-        word_col = headers.index("word_id")
-    except ValueError:
-        return None
-
-    for row_number, row in enumerate(all_values[1:], start=2):
-        row_user = row[user_col] if user_col < len(row) else ""
-        row_word = row[word_col] if word_col < len(row) else ""
-
-        if row_user == user_id and row_word == word_id:
-            return row_number
-
-    return None
-
-
-def upsert_progress_to_sheet(user_id: str, word_row: pd.Series, progress_record: dict):
-    """
-    新增或更新一筆學習紀錄到 Google Sheets。
-    """
-    spreadsheet = get_spreadsheet()
-    ws = get_or_create_worksheet(spreadsheet, "progress", PROGRESS_HEADERS, None)
-
-    word_id = safe_str(word_row["word_id"])
-    row_number = find_progress_row_number(ws, user_id, word_id)
-
-    row_data = [safe_str(progress_record.get(col, "")) for col in PROGRESS_HEADERS]
-
-    if row_number is None:
-        ws.append_row(row_data, value_input_option="USER_ENTERED")
-    else:
-        cell_range = f"A{row_number}:{chr(64 + len(PROGRESS_HEADERS))}{row_number}"
-        ws.update(cell_range, [row_data], value_input_option="USER_ENTERED")
-
-    clear_sheet_cache()
-
-
-# ============================================================
-# 8. 記憶曲線計算
-# ============================================================
 
 def calculate_review_result(level: str, current_progress: dict) -> dict:
     """
-    根據熟悉度按鈕，計算新的學習紀錄。
+    根據熟悉度按鈕計算新紀錄。
     """
     today = date.today()
 
@@ -573,32 +473,70 @@ def calculate_review_result(level: str, current_progress: dict) -> dict:
 
     return {
         "status": status,
-        "mastery": str(mastery),
-        "review_count": str(review_count),
-        "correct_count": str(correct_count),
-        "wrong_count": str(wrong_count),
-        "streak_correct": str(streak_correct),
+        "mastery": mastery,
+        "review_count": review_count,
+        "correct_count": correct_count,
+        "wrong_count": wrong_count,
+        "streak_correct": streak_correct,
         "last_review": today.isoformat(),
         "next_review": next_review.isoformat(),
         "updated_at": datetime.now().isoformat(timespec="seconds"),
     }
 
 
-def update_progress(user_id: str, word_row: pd.Series, level: str, current_progress: dict):
-    """
-    更新某位使用者某個單字的學習紀錄。
-    """
-    base_record = normalize_progress_record(current_progress, user_id, word_row)
-    result = calculate_review_result(level, base_record)
+def update_progress(user_id: str, word_row: pd.Series, level: str):
+    """更新學習紀錄。"""
+    word_id = safe_str(word_row["word_id"])
+    current_progress = get_progress(user_id, word_id)
+    result = calculate_review_result(level, current_progress)
 
-    updated_record = base_record.copy()
-    updated_record.update(result)
+    conn = get_conn()
+    cur = conn.cursor()
 
-    upsert_progress_to_sheet(user_id, word_row, updated_record)
+    cur.execute(
+        """
+        UPDATE progress
+        SET
+            word = ?,
+            grade = ?,
+            semester = ?,
+            lesson = ?,
+            status = ?,
+            mastery = ?,
+            review_count = ?,
+            correct_count = ?,
+            wrong_count = ?,
+            streak_correct = ?,
+            last_review = ?,
+            next_review = ?,
+            updated_at = ?
+        WHERE user_id = ? AND word_id = ?
+        """,
+        (
+            safe_str(word_row.get("word", "")),
+            safe_str(word_row.get("grade", "")),
+            safe_str(word_row.get("semester", "")),
+            safe_str(word_row.get("lesson", "")),
+            result["status"],
+            result["mastery"],
+            result["review_count"],
+            result["correct_count"],
+            result["wrong_count"],
+            result["streak_correct"],
+            result["last_review"],
+            result["next_review"],
+            result["updated_at"],
+            user_id,
+            word_id,
+        )
+    )
+
+    conn.commit()
+    conn.close()
 
 
 # ============================================================
-# 9. 載入資料
+# 8. 載入資料與初始化
 # ============================================================
 
 words_df = load_words()
@@ -606,26 +544,17 @@ words_df = load_words()
 if words_df.empty:
     st.stop()
 
-users_df = load_users_from_sheet()
-progress_df = load_progress_from_sheet()
+init_db()
+ensure_progress_for_words(words_df)
 
-# 確保 progress_df 有完整欄位
-for col in PROGRESS_HEADERS:
-    if col not in progress_df.columns:
-        progress_df[col] = ""
-
-progress_df = progress_df[PROGRESS_HEADERS].fillna("")
+users_df = load_users()
 
 
 # ============================================================
-# 10. 側邊欄：選擇使用者
+# 9. 側邊欄：選擇使用者
 # ============================================================
 
 st.sidebar.header("👤 使用者")
-
-if users_df.empty:
-    st.error("users 工作表沒有使用者資料。")
-    st.stop()
 
 user_options = {
     f"{row['user_name']}（{row['user_id']}）": row["user_id"]
@@ -638,36 +567,38 @@ selected_user_name = selected_user_label.split("（")[0]
 
 
 # ============================================================
-# 11. 合併單字資料與該使用者的學習紀錄
+# 10. 合併單字與目前使用者進度
 # ============================================================
 
-user_progress_df = progress_df[progress_df["user_id"].astype(str) == selected_user_id].copy()
+progress_df = load_progress(selected_user_id)
 
 merged_df = words_df.merge(
-    user_progress_df,
+    progress_df,
     on="word_id",
     how="left",
     suffixes=("", "_progress")
 )
 
-# progress 欄位補空
-for col in PROGRESS_HEADERS:
+# 缺漏值補齊
+for col in [
+    "status", "mastery", "review_count", "correct_count", "wrong_count",
+    "streak_correct", "last_review", "next_review"
+]:
     if col not in merged_df.columns:
         merged_df[col] = ""
 
-# word / grade 等欄位 merge 後可能有 progress 版本，這裡以 words.csv 為主
 merged_df["status"] = merged_df["status"].replace("", "未學")
-merged_df["mastery"] = merged_df["mastery"].replace("", "0")
-merged_df["review_count"] = merged_df["review_count"].replace("", "0")
-merged_df["correct_count"] = merged_df["correct_count"].replace("", "0")
-merged_df["wrong_count"] = merged_df["wrong_count"].replace("", "0")
-merged_df["streak_correct"] = merged_df["streak_correct"].replace("", "0")
+merged_df["mastery"] = merged_df["mastery"].replace("", 0)
+merged_df["review_count"] = merged_df["review_count"].replace("", 0)
+merged_df["correct_count"] = merged_df["correct_count"].replace("", 0)
+merged_df["wrong_count"] = merged_df["wrong_count"].replace("", 0)
+merged_df["streak_correct"] = merged_df["streak_correct"].replace("", 0)
 
 merged_df = merged_df.fillna("")
 
 
 # ============================================================
-# 12. 側邊欄：學習範圍與模式
+# 11. 側邊欄：範圍與模式
 # ============================================================
 
 st.sidebar.divider()
@@ -716,7 +647,6 @@ if keyword.strip():
         "example_1", "example_2", "example_3", "example_4", "example_5",
         "example_zh_1", "example_zh_2", "example_zh_3", "example_zh_4", "example_zh_5"
     ]
-
     search_columns = [col for col in search_columns if col in filtered_df.columns]
 
     mask = False
@@ -744,7 +674,7 @@ elif mode == "已掌握":
 
 
 # ============================================================
-# 13. 側邊欄：學習統計
+# 12. 統計
 # ============================================================
 
 st.sidebar.divider()
@@ -754,7 +684,6 @@ total_words = len(merged_df)
 not_started = len(merged_df[merged_df["status"].astype(str).isin(["", "未學"])])
 learning = len(merged_df[merged_df["status"].astype(str).isin(["學習中", "熟悉"])])
 mastered = len(merged_df[merged_df["status"].astype(str) == "已掌握"])
-
 due_today = len(
     merged_df[
         (merged_df["next_review"].astype(str) == "") |
@@ -771,12 +700,12 @@ st.sidebar.write(f"已掌握：**{mastered}**")
 
 
 # ============================================================
-# 14. 主畫面標題與統計卡
+# 13. 主畫面
 # ============================================================
 
 st.markdown('<div class="main-title">📘 國中英文單字複習</div>', unsafe_allow_html=True)
 st.markdown(
-    '<div class="small-caption">第二階段正式版：Google Sheets 學習紀錄 + 多使用者進度</div>',
+    '<div class="small-caption">第二階段：SQLite 學習紀錄 + 多使用者 + 下載備份</div>',
     unsafe_allow_html=True
 )
 
@@ -796,12 +725,13 @@ if filtered_df.empty:
 
 
 # ============================================================
-# 15. 單字卡索引控制
+# 14. 單字卡索引控制
 # ============================================================
 
 filter_signature = hashlib.md5(
     "|".join([
-        selected_user_id, mode, selected_grade, selected_semester, selected_lesson, selected_pos, keyword
+        selected_user_id, mode, selected_grade, selected_semester,
+        selected_lesson, selected_pos, keyword
     ]).encode("utf-8")
 ).hexdigest()
 
@@ -821,24 +751,11 @@ if st.session_state.card_index >= len(filtered_df):
 filtered_df = filtered_df.reset_index(drop=True)
 current_word = filtered_df.iloc[st.session_state.card_index]
 current_word_id = safe_str(current_word["word_id"])
+current_progress = get_progress(selected_user_id, current_word_id)
 
 
 # ============================================================
-# 16. 取得目前單字的學習紀錄
-# ============================================================
-
-current_progress_row = user_progress_df[
-    user_progress_df["word_id"].astype(str) == current_word_id
-]
-
-if len(current_progress_row) > 0:
-    current_progress = current_progress_row.iloc[0].to_dict()
-else:
-    current_progress = normalize_progress_record({}, selected_user_id, current_word)
-
-
-# ============================================================
-# 17. 自動播放單字與第一句例句
+# 15. 自動播放單字
 # ============================================================
 
 if "last_autoplay_word_id" not in st.session_state:
@@ -853,7 +770,7 @@ if st.session_state.last_autoplay_word_id != autoplay_key:
 
 
 # ============================================================
-# 18. 單字卡：左右兩欄
+# 16. 單字卡左右欄
 # ============================================================
 
 left_col, right_col = st.columns([0.92, 1.35], gap="large")
@@ -884,11 +801,11 @@ with left_col:
     progress_rows = [
         ("使用者", selected_user_name),
         ("狀態", safe_str(current_progress.get("status", "未學"))),
-        ("熟練度", f"{safe_str(current_progress.get('mastery', '0'))} / 100"),
-        ("複習次數", safe_str(current_progress.get("review_count", "0"))),
-        ("答對次數", safe_str(current_progress.get("correct_count", "0"))),
-        ("答錯次數", safe_str(current_progress.get("wrong_count", "0"))),
-        ("連續答對", safe_str(current_progress.get("streak_correct", "0"))),
+        ("熟練度", f"{safe_str(current_progress.get('mastery', 0))} / 100"),
+        ("複習次數", safe_str(current_progress.get("review_count", 0))),
+        ("答對次數", safe_str(current_progress.get("correct_count", 0))),
+        ("答錯次數", safe_str(current_progress.get("wrong_count", 0))),
+        ("連續答對", safe_str(current_progress.get("streak_correct", 0))),
         ("上次複習", safe_str(current_progress.get("last_review", ""))),
         ("下次複習", safe_str(current_progress.get("next_review", ""))),
     ]
@@ -901,26 +818,26 @@ with left_col:
 
     with b1:
         if st.button("😵 忘記了", use_container_width=True, key=f"forgot_{selected_user_id}_{current_word_id}"):
-            update_progress(selected_user_id, current_word, "forgot", current_progress)
-            st.success("已同步到 Google Sheets：忘記了。明天會再複習。")
+            update_progress(selected_user_id, current_word, "forgot")
+            st.success("已記錄：忘記了。明天會再複習。")
             st.rerun()
 
     with b2:
         if st.button("😐 不熟", use_container_width=True, key=f"hard_{selected_user_id}_{current_word_id}"):
-            update_progress(selected_user_id, current_word, "hard", current_progress)
-            st.success("已同步到 Google Sheets：不熟。2 天後會再複習。")
+            update_progress(selected_user_id, current_word, "hard")
+            st.success("已記錄：不熟。2 天後會再複習。")
             st.rerun()
 
     with b3:
         if st.button("🙂 認識", use_container_width=True, key=f"good_{selected_user_id}_{current_word_id}"):
-            update_progress(selected_user_id, current_word, "good", current_progress)
-            st.success("已同步到 Google Sheets：認識。4 天後會再複習。")
+            update_progress(selected_user_id, current_word, "good")
+            st.success("已記錄：認識。4 天後會再複習。")
             st.rerun()
 
     with b4:
         if st.button("😄 很熟", use_container_width=True, key=f"easy_{selected_user_id}_{current_word_id}"):
-            update_progress(selected_user_id, current_word, "easy", current_progress)
-            st.success("已同步到 Google Sheets：很熟。會延後複習。")
+            update_progress(selected_user_id, current_word, "easy")
+            st.success("已記錄：很熟。會延後複習。")
             st.rerun()
 
     st.divider()
@@ -961,7 +878,6 @@ with right_col:
 
     pos_en = safe_str(current_word.get("pos_en", "")).lower()
     pos = safe_str(current_word.get("pos", "")).lower()
-
     is_verb = ("verb" in pos_en) or ("verb" in pos) or ("動詞" in safe_str(current_word.get("pos_zh", "")))
 
     if is_verb:
@@ -1009,7 +925,7 @@ with right_col:
 
 
 # ============================================================
-# 19. 例句
+# 17. 例句
 # ============================================================
 
 st.divider()
@@ -1033,8 +949,10 @@ if not examples:
     if old_en:
         examples.append((1, old_en, old_zh))
 
+# 自動播放第一句例句一次
 if examples:
     first_example_text = examples[0][1]
+
     if "last_autoplay_example_id" not in st.session_state:
         st.session_state.last_autoplay_example_id = ""
 
@@ -1060,7 +978,7 @@ for idx, (num, en_text, zh_text) in enumerate(examples):
 
 
 # ============================================================
-# 20. 資料檢視與備份
+# 18. 資料檢視與備份下載
 # ============================================================
 
 st.divider()
@@ -1081,30 +999,70 @@ with st.expander("查看目前範圍的單字與學習狀態"):
     )
 
 
-with st.expander("查看 Google Sheets 學習紀錄 / 下載備份"):
-    st.write("目前學習紀錄直接存放在 Google Sheets 的 `progress` 工作表。")
-    st.write(f"目前顯示使用者：**{selected_user_name}**")
+with st.expander("備份 / 下載學習紀錄"):
+    st.write("目前學習紀錄存在 `progress.db`。")
+    st.warning("如果部署在 Streamlit Cloud，重新部署或休眠後資料可能遺失，建議定期下載備份。")
 
-    selected_progress = progress_df[progress_df["user_id"].astype(str) == selected_user_id]
+    all_progress = load_progress()
+    selected_progress = load_progress(selected_user_id)
 
-    if selected_progress.empty:
-        st.info("這位使用者目前還沒有任何學習紀錄。按下熟悉度按鈕後，就會寫入 Google Sheets。")
+    st.write(f"目前使用者：**{selected_user_name}**")
+    st.write(f"這位使用者目前共有 **{len(selected_progress)}** 筆學習紀錄。")
+
+    st.dataframe(selected_progress, use_container_width=True, hide_index=True)
+
+    csv_bytes = selected_progress.to_csv(index=False).encode("utf-8-sig")
+    st.download_button(
+        label=f"下載 {selected_user_name} 的學習紀錄 CSV",
+        data=csv_bytes,
+        file_name=f"{selected_user_id}_progress_backup.csv",
+        mime="text/csv",
+        key=f"download_csv_{selected_user_id}"
+    )
+
+    all_csv_bytes = all_progress.to_csv(index=False).encode("utf-8-sig")
+    st.download_button(
+        label="下載全部使用者學習紀錄 CSV",
+        data=all_csv_bytes,
+        file_name="all_progress_backup.csv",
+        mime="text/csv",
+        key="download_all_csv"
+    )
+
+    if DB_PATH.exists():
+        with open(DB_PATH, "rb") as db_file:
+            st.download_button(
+                label="下載 progress.db 完整備份",
+                data=db_file,
+                file_name="progress.db",
+                mime="application/octet-stream",
+                key="download_db"
+            )
     else:
-        st.dataframe(selected_progress, use_container_width=True, hide_index=True)
-
-        csv_bytes = selected_progress.to_csv(index=False).encode("utf-8-sig")
-        st.download_button(
-            label=f"下載 {selected_user_name} 的學習紀錄 CSV",
-            data=csv_bytes,
-            file_name=f"{selected_user_id}_progress_backup.csv",
-            mime="text/csv",
-            key=f"download_progress_{selected_user_id}"
-        )
+        st.error("目前找不到 progress.db。")
 
 
-with st.expander("Google Sheets 設定檢查"):
-    st.write("這一版不使用 `progress.db`。")
-    st.write("學習紀錄會寫入 Google Sheets。")
-    st.write("需要的工作表：`users`、`progress`。")
-    st.write("若工作表不存在，程式會嘗試自動建立。")
-    st.write("若無法連線，請檢查 Streamlit Secrets 與 Google Sheet 分享權限。")
+with st.expander("開發備註：目前版本"):
+    st.markdown(
+        """
+        目前版本已回到 SQLite + 下載備份，不使用 Google Sheets。
+
+        檔案說明：
+
+        - `words.csv`：單字資料
+        - `progress.db`：學習紀錄資料庫
+        - `audio_cache/`：發音 mp3 快取
+
+        支援三個使用者：
+
+        - 女兒
+        - 兒子
+        - 測試帳
+
+        接下來可繼續開發：
+
+        1. 第三階段：基本測驗功能
+        2. 第四階段：錯題本
+        3. 第五階段：每日任務
+        """
+    )
