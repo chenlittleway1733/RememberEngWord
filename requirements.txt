@@ -1,3 +1,5 @@
 streamlit
 pandas
 edge-tts
+gspread
+google-auth
