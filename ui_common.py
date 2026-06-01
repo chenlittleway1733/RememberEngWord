@@ -4,6 +4,7 @@ ui_common.py
 """
 
 from datetime import date
+import json
 import pandas as pd
 import streamlit as st
 
@@ -14,6 +15,8 @@ from database import (
     load_quiz_log,
     import_user_progress_from_csv,
     import_user_quiz_log_from_csv,
+    export_user_combined_backup,
+    import_user_combined_backup,
     restore_full_db,
 )
 
@@ -186,6 +189,57 @@ def render_sidebar_quick_backup(user_id: str, user_name: str):
             key=f"sidebar_download_quiz_log_{user_id}",
             use_container_width=True
         )
+
+        # 單一使用者完整備份：同時包含 progress 與 quiz_log
+        sidebar_combined_backup = export_user_combined_backup(user_id, user_name)
+        st.sidebar.download_button(
+            label=f"⬇️ 下載{user_name}完整備份",
+            data=sidebar_combined_backup,
+            file_name=f"{user_id}_full_backup.json",
+            mime="application/json",
+            key=f"sidebar_download_combined_{user_id}",
+            use_container_width=True
+        )
+
+        with st.sidebar.expander(f"⬆️ 上傳{user_name}完整備份"):
+            st.caption("此功能會同時覆蓋目前使用者的學習紀錄與測驗紀錄。")
+
+            sidebar_uploaded_combined = st.file_uploader(
+                "選擇完整備份 JSON",
+                type=["json"],
+                key=f"sidebar_upload_combined_{user_id}"
+            )
+
+            sidebar_confirm_combined = st.checkbox(
+                f"確認覆蓋{user_name}完整紀錄",
+                key=f"sidebar_confirm_combined_{user_id}"
+            )
+
+            if sidebar_uploaded_combined is not None:
+                try:
+                    backup_data = json.load(sidebar_uploaded_combined)
+
+                    st.write("備份檔資訊：")
+                    st.write(f"匯出時間：{backup_data.get('exported_at', '')}")
+                    st.write(f"原使用者：{backup_data.get('user_name', '')}（{backup_data.get('user_id', '')}）")
+                    st.write(f"學習紀錄：{len(backup_data.get('progress', []))} 筆")
+                    st.write(f"測驗紀錄：{len(backup_data.get('quiz_log', []))} 筆")
+
+                    if st.button(
+                        "開始覆蓋匯入完整備份",
+                        disabled=not sidebar_confirm_combined,
+                        key=f"sidebar_start_combined_import_{user_id}",
+                        use_container_width=True
+                    ):
+                        ok, msg = import_user_combined_backup(user_id, backup_data)
+                        if ok:
+                            st.success(msg)
+                            st.rerun()
+                        else:
+                            st.error(msg)
+
+                except Exception as e:
+                    st.error(f"讀取完整備份 JSON 失敗：{e}")
 
         with st.sidebar.expander(f"⬆️ 上傳{user_name}學習紀錄"):
             st.caption("上傳 CSV 後，只會更新目前選定帳號。")
@@ -387,6 +441,15 @@ def render_backup_section(user_id: str, user_name: str):
                 key=f"download_quiz_log_{user_id}"
             )
 
+            combined_backup = export_user_combined_backup(user_id, user_name)
+            st.download_button(
+                label=f"下載 {user_name} 的完整備份 JSON",
+                data=combined_backup,
+                file_name=f"{user_id}_full_backup.json",
+                mime="application/json",
+                key=f"download_combined_{user_id}"
+            )
+
             all_csv_bytes = all_progress.to_csv(index=False).encode("utf-8-sig")
             st.download_button(
                 label="下載全部使用者學習紀錄 CSV",
@@ -409,7 +472,43 @@ def render_backup_section(user_id: str, user_name: str):
                 st.error("目前找不到 progress.db。")
 
         with tab_upload_user:
-            st.subheader("上傳單一帳號紀錄")
+            st.subheader("上傳單一使用者完整備份")
+            st.info("完整備份 JSON 會同時覆蓋目前使用者的 progress 學習紀錄與 quiz_log 測驗紀錄。")
+
+            uploaded_combined_json = st.file_uploader(
+                f"上傳 {user_name} 的完整備份 JSON",
+                type=["json"],
+                key=f"upload_combined_json_{user_id}"
+            )
+
+            confirm_combined_import = st.checkbox(
+                f"我確認要覆蓋 {user_name} 的完整紀錄",
+                key=f"confirm_combined_import_{user_id}"
+            )
+
+            if uploaded_combined_json is not None:
+                try:
+                    backup_data = json.load(uploaded_combined_json)
+
+                    st.write("完整備份資訊：")
+                    st.write(f"匯出時間：{backup_data.get('exported_at', '')}")
+                    st.write(f"原使用者：{backup_data.get('user_name', '')}（{backup_data.get('user_id', '')}）")
+                    st.write(f"學習紀錄：{len(backup_data.get('progress', []))} 筆")
+                    st.write(f"測驗紀錄：{len(backup_data.get('quiz_log', []))} 筆")
+
+                    if st.button("開始覆蓋匯入完整備份", disabled=not confirm_combined_import, key=f"start_combined_import_{user_id}"):
+                        ok, msg = import_user_combined_backup(user_id, backup_data)
+                        if ok:
+                            st.success(msg)
+                            st.rerun()
+                        else:
+                            st.error(msg)
+
+                except Exception as e:
+                    st.error(f"讀取完整備份 JSON 失敗：{e}")
+
+            st.divider()
+            st.subheader("分開上傳學習紀錄 progress")
             st.info(f"這裡只會更新目前選定帳號：{user_name}（{user_id}）。")
 
             import_mode_label = st.radio(
