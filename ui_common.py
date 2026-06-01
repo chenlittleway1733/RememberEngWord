@@ -163,9 +163,10 @@ def render_sidebar_quick_backup(user_id: str, user_name: str):
     try:
         sidebar_selected_progress = load_progress(user_id)
 
+        # 下載目前使用者的學習進度 progress
         sidebar_csv_bytes = sidebar_selected_progress.to_csv(index=False).encode("utf-8-sig")
         st.sidebar.download_button(
-            label=f"⬇️ 下載{user_name}紀錄",
+            label=f"⬇️ 下載{user_name}學習紀錄",
             data=sidebar_csv_bytes,
             file_name=f"{user_id}_progress_backup.csv",
             mime="text/csv",
@@ -173,7 +174,19 @@ def render_sidebar_quick_backup(user_id: str, user_name: str):
             use_container_width=True
         )
 
-        with st.sidebar.expander(f"⬆️ 上傳{user_name}紀錄"):
+        # 下載目前使用者的測驗紀錄 quiz_log
+        sidebar_quiz_log = load_quiz_log(user_id)
+        sidebar_quiz_bytes = sidebar_quiz_log.to_csv(index=False).encode("utf-8-sig")
+        st.sidebar.download_button(
+            label=f"⬇️ 下載{user_name}測驗紀錄",
+            data=sidebar_quiz_bytes,
+            file_name=f"{user_id}_quiz_log_backup.csv",
+            mime="text/csv",
+            key=f"sidebar_download_quiz_log_{user_id}",
+            use_container_width=True
+        )
+
+        with st.sidebar.expander(f"⬆️ 上傳{user_name}學習紀錄"):
             st.caption("上傳 CSV 後，只會更新目前選定帳號。")
 
             sidebar_import_mode_label = st.radio(
