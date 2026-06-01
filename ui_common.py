@@ -13,6 +13,7 @@ from database import (
     load_progress,
     load_quiz_log,
     import_user_progress_from_csv,
+    import_user_quiz_log_from_csv,
     restore_full_db,
 )
 
@@ -233,6 +234,45 @@ def render_sidebar_quick_backup(user_id: str, user_name: str):
                             st.error(msg)
                 except Exception as e:
                     st.error(f"讀取 CSV 失敗：{e}")
+
+        with st.sidebar.expander(f"⬆️ 上傳{user_name}測驗紀錄"):
+            st.caption("此功能會覆蓋目前使用者原本的測驗紀錄，不提供合併，避免重複紀錄。")
+
+            sidebar_uploaded_quiz_csv = st.file_uploader(
+                "選擇 quiz_log CSV 備份檔",
+                type=["csv"],
+                key=f"sidebar_upload_quiz_csv_{user_id}"
+            )
+
+            sidebar_confirm_quiz_import = st.checkbox(
+                f"確認覆蓋{user_name}測驗紀錄",
+                key=f"sidebar_confirm_quiz_import_{user_id}"
+            )
+
+            if sidebar_uploaded_quiz_csv is not None:
+                try:
+                    sidebar_quiz_preview_df = pd.read_csv(sidebar_uploaded_quiz_csv)
+                    st.write("預覽前 3 筆：")
+                    st.dataframe(sidebar_quiz_preview_df.head(3), use_container_width=True, hide_index=True)
+
+                    if st.button(
+                        "開始覆蓋匯入測驗紀錄",
+                        disabled=not sidebar_confirm_quiz_import,
+                        key=f"sidebar_start_quiz_import_{user_id}",
+                        use_container_width=True
+                    ):
+                        ok, msg = import_user_quiz_log_from_csv(
+                            user_id,
+                            sidebar_quiz_preview_df
+                        )
+                        if ok:
+                            st.success(msg)
+                            st.rerun()
+                        else:
+                            st.error(msg)
+
+                except Exception as e:
+                    st.error(f"讀取 quiz_log CSV 失敗：{e}")
     except Exception as e:
         st.sidebar.warning(f"快速備份功能暫時無法使用：{e}")
 
@@ -405,6 +445,38 @@ def render_backup_section(user_id: str, user_name: str):
                             st.error(msg)
                 except Exception as e:
                     st.error(f"讀取 CSV 失敗：{e}")
+
+
+            st.divider()
+            st.subheader("上傳測驗紀錄 quiz_log")
+            st.info("測驗紀錄上傳固定採用覆蓋模式：會先清除目前使用者的 quiz_log，再匯入 CSV。")
+
+            uploaded_quiz_csv = st.file_uploader(
+                f"上傳 {user_name} 的 quiz_log CSV 備份",
+                type=["csv"],
+                key=f"upload_quiz_csv_{user_id}"
+            )
+
+            confirm_quiz_import = st.checkbox(
+                f"我確認要覆蓋 {user_name} 的測驗紀錄",
+                key=f"confirm_quiz_import_{user_id}"
+            )
+
+            if uploaded_quiz_csv is not None:
+                try:
+                    quiz_preview_df = pd.read_csv(uploaded_quiz_csv)
+                    st.write("quiz_log CSV 預覽：")
+                    st.dataframe(quiz_preview_df.head(10), use_container_width=True, hide_index=True)
+
+                    if st.button("開始覆蓋匯入測驗紀錄", disabled=not confirm_quiz_import, key=f"start_quiz_import_{user_id}"):
+                        ok, msg = import_user_quiz_log_from_csv(user_id, quiz_preview_df)
+                        if ok:
+                            st.success(msg)
+                            st.rerun()
+                        else:
+                            st.error(msg)
+                except Exception as e:
+                    st.error(f"讀取 quiz_log CSV 失敗：{e}")
 
         with tab_upload_db:
             st.subheader("還原完整 progress.db")
