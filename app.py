@@ -11,7 +11,7 @@ import io
 
 # ============================================================
 # 國中英文單字智慧複習系統
-# app_v14.py
+# app_v15.py
 #
 # 本版方向：
 # 回到 SQLite + 下載備份，不使用 Google Sheets。
@@ -90,71 +90,38 @@ st.markdown(
         background: linear-gradient(135deg, rgba(80,120,200,0.10), rgba(255,255,255,0.035));
         box-shadow: 0 4px 16px rgba(0,0,0,0.12);
     }
-    .info-card {
+    .soft-card {
         border: 1px solid rgba(120,140,180,0.25);
         border-radius: 16px;
         padding: 14px 16px;
         margin-bottom: 14px;
         background: rgba(80,120,200,0.055);
     }
-    .verb-card {
+    .soft-card-green {
         border: 1px solid rgba(60,160,120,0.28);
         border-radius: 16px;
         padding: 14px 16px;
         margin-bottom: 14px;
         background: rgba(60,160,120,0.060);
     }
-    .noun-card {
+    .soft-card-orange {
         border: 1px solid rgba(180,130,60,0.28);
         border-radius: 16px;
         padding: 14px 16px;
         margin-bottom: 14px;
         background: rgba(180,130,60,0.065);
     }
-    .usage-card {
+    .soft-card-purple {
         border: 1px solid rgba(150,90,190,0.28);
         border-radius: 16px;
         padding: 14px 16px;
         margin-bottom: 14px;
         background: rgba(150,90,190,0.060);
     }
-    .progress-card {
-        border: 1px solid rgba(90,150,210,0.25);
-        border-radius: 16px;
-        padding: 14px 16px;
-        margin-bottom: 14px;
-        background: rgba(90,150,210,0.055);
-    }
-    .example-card {
-        border: 1px solid rgba(160,160,160,0.25);
-        border-radius: 14px;
-        padding: 12px 14px;
-        margin-bottom: 10px;
-        background: rgba(255,255,255,0.045);
-    }
-    .section-header {
+    .soft-title {
         font-size: 1.15rem;
         font-weight: 900;
         margin-bottom: 0.65rem;
-        padding-bottom: 0.35rem;
-        border-bottom: 1px solid rgba(160,160,160,0.25);
-    }
-    .mini-row {
-        display: grid;
-        grid-template-columns: 38% 62%;
-        gap: 8px;
-        padding: 7px 0;
-        border-bottom: 1px dashed rgba(160,160,160,0.20);
-    }
-    .mini-row:last-child {
-        border-bottom: 0;
-    }
-    .mini-label {
-        color: #777;
-        font-weight: 700;
-    }
-    .mini-value {
-        font-weight: 650;
     }
     .word-text {
         text-align: center;
@@ -174,6 +141,13 @@ st.markdown(
         font-weight: 800;
         margin-top: 0.8rem;
         margin-bottom: 0.4rem;
+    }
+    .example-card {
+        border: 1px solid rgba(160,160,160,0.25);
+        border-radius: 14px;
+        padding: 12px 14px;
+        margin-bottom: 10px;
+        background-color: rgba(255,255,255,0.035);
     }
     .example-en {
         font-size: 1.02rem;
@@ -303,98 +277,66 @@ def show_info_table(rows: list[tuple[str, str]]):
     st.dataframe(df, hide_index=True, use_container_width=True)
 
 
-def show_info_card(title: str, rows: list[tuple[str, str]], icon: str = "📌", card_class: str = "info-card"):
+def open_card(title: str, icon: str = "📌", css_class: str = "soft-card"):
     """
-    用自訂 HTML 顯示資料卡片。
-    這比 st.dataframe 更像學習卡片，也比較能用色塊區分區域。
-    """
-    clean_rows = [(safe_str(k), safe_str(v)) for k, v in rows if safe_str(v)]
-    if not clean_rows:
-        return
-
-    row_html = ""
-    for label, value in clean_rows:
-        row_html += f"""
-        <div class="mini-row">
-            <div class="mini-label">{html.escape(label)}</div>
-            <div class="mini-value">{html.escape(value)}</div>
-        </div>
-        """
-
-    card_html = f"""
-    <div class="{card_class}">
-        <div class="section-header">{icon} {html.escape(title)}</div>
-        {row_html}
-    </div>
-    """
-    st.markdown(card_html, unsafe_allow_html=True)
-
-
-def show_progress_card(title: str, rows: list[tuple[str, str]]):
-    """學習狀態專用卡片。"""
-    show_info_card(title, rows, icon="📈", card_class="progress-card")
-
-
-def show_verb_card_with_audio(current_word: pd.Series, selected_user_id: str, current_word_id: str):
-    """
-    顯示動詞資料。
-    原形、過去式、過去分詞、現在分詞右方都有發音按鈕。
-    因為 Streamlit 的按鈕不能直接放在 HTML 表格裡，
-    所以這裡用 st.columns 做成「項目 / 內容 / 發音」三欄。
+    開啟一個簡單色塊卡片。
+    注意：只放標題和框線，不把 Streamlit 表格包在 HTML 裡，
+    避免 Streamlit 把 HTML 顯示成純文字。
     """
     st.markdown(
-        """
-        <div class="verb-card">
-            <div class="section-header">🟢 動詞資料</div>
+        f"""
+        <div class="{css_class}">
+            <div class="soft-title">{icon} {html.escape(title)}</div>
         </div>
         """,
         unsafe_allow_html=True
     )
 
+
+def show_table_in_card(title: str, rows: list[tuple[str, str]], icon: str = "📌", css_class: str = "soft-card"):
+    """
+    穩定版卡片：
+    先顯示一個色塊標題，再用 Streamlit 原生 dataframe 顯示資料。
+    """
+    open_card(title, icon=icon, css_class=css_class)
+    show_info_table(rows)
+
+
+def show_verb_rows_with_audio(current_word: pd.Series, selected_user_id: str, current_word_id: str):
+    """
+    動詞資料：原形、過去式、過去分詞、現在分詞右側各有發音按鈕。
+    使用 Streamlit columns，避免複雜 HTML。
+    """
+    open_card("動詞資料", icon="🟢", css_class="soft-card-green")
+
     base_form = safe_str(current_word.get("base_form", ""))
     if not base_form:
         base_form = safe_str(current_word.get("word", ""))
 
-    verb_rows = [
+    rows = [
         ("原形", base_form, "base"),
         ("過去式", safe_str(current_word.get("past", "")), "past"),
         ("過去分詞", safe_str(current_word.get("past_participle", "")), "pp"),
         ("現在分詞", safe_str(current_word.get("present_participle", "")), "ing"),
     ]
 
-    # 三欄標題
-    h1, h2, h3 = st.columns([0.32, 0.48, 0.20])
+    h1, h2, h3 = st.columns([0.28, 0.52, 0.20])
     h1.markdown("**項目**")
     h2.markdown("**內容**")
     h3.markdown("**發音**")
 
-    for label, value, audio_key in verb_rows:
+    for label, value, audio_key in rows:
         if not safe_str(value):
             continue
-
-        c1, c2, c3 = st.columns([0.32, 0.48, 0.20])
+        c1, c2, c3 = st.columns([0.28, 0.52, 0.20])
         c1.write(label)
         c2.markdown(f"**{value}**")
         with c3:
-            audio_button(
-                value,
-                "🔊",
-                key=f"verb_audio_{selected_user_id}_{current_word_id}_{audio_key}"
-            )
+            audio_button(value, "🔊", key=f"verb_audio_{selected_user_id}_{current_word_id}_{audio_key}")
 
     transitivity = safe_str(current_word.get("transitivity", ""))
     if transitivity:
-        st.markdown(
-            f"""
-            <div class="verb-card" style="margin-top: 8px;">
-                <div class="mini-row">
-                    <div class="mini-label">及物 / 不及物</div>
-                    <div class="mini-value">{html.escape(transitivity)}</div>
-                </div>
-            </div>
-            """,
-            unsafe_allow_html=True
-        )
+        show_info_table([("及物 / 不及物", transitivity)])
 
 
 # ============================================================
@@ -1135,7 +1077,7 @@ st.sidebar.write(f"已掌握：**{mastered}**")
 
 st.markdown('<div class="main-title">📘 國中英文單字複習</div>', unsafe_allow_html=True)
 st.markdown(
-    '<div class="small-caption">第二階段：SQLite 學習紀錄 + 多使用者 + 介面美化 + 動詞變化發音 + 側邊欄快速上傳下載</div>',
+    '<div class="small-caption">第二階段：SQLite 學習紀錄 + 穩定介面美化 + 動詞變化發音 + 舊資料庫自動遷移</div>',
     unsafe_allow_html=True
 )
 
@@ -1237,7 +1179,7 @@ with left_col:
         ("上次複習", safe_str(current_progress.get("last_review", ""))),
         ("下次複習", safe_str(current_progress.get("next_review", ""))),
     ]
-    show_progress_card("學習狀態", progress_rows)
+    show_table_in_card("學習狀態", progress_rows, icon="📈", css_class="soft-card")
 
     st.markdown('<div class="section-title">我對這個字的熟悉度</div>', unsafe_allow_html=True)
 
@@ -1300,14 +1242,14 @@ with right_col:
         ("標籤", safe_str(current_word.get("tags", ""))),
         ("補充說明", safe_str(current_word.get("note", ""))),
     ]
-    show_info_card("基本資料", basic_rows, icon="🔵", card_class="info-card")
+    show_table_in_card("基本資料", basic_rows, icon="🔵", css_class="soft-card")
 
     pos_en = safe_str(current_word.get("pos_en", "")).lower()
     pos = safe_str(current_word.get("pos", "")).lower()
     is_verb = ("verb" in pos_en) or ("verb" in pos) or ("動詞" in safe_str(current_word.get("pos_zh", "")))
 
     if is_verb:
-        show_verb_card_with_audio(current_word, selected_user_id, current_word_id)
+        show_verb_rows_with_audio(current_word, selected_user_id, current_word_id)
 
     plural = safe_str(current_word.get("plural", ""))
     plural_rule = safe_str(current_word.get("plural_rule", ""))
@@ -1317,7 +1259,7 @@ with right_col:
             ("複數形", plural),
             ("複數規則", plural_rule),
         ]
-        show_info_card("名詞 / 數字用法", noun_rows, icon="🟠", card_class="noun-card")
+        show_table_in_card("名詞 / 數字用法", noun_rows, icon="🟠", css_class="soft-card-orange")
 
     required_prepositions = safe_str(current_word.get("required_prepositions", ""))
     usage_patterns = safe_str(current_word.get("usage_patterns", ""))
@@ -1327,7 +1269,7 @@ with right_col:
             ("常搭配介系詞", required_prepositions),
             ("常用句型 / 用法", usage_patterns),
         ]
-        show_info_card("常用用法", usage_rows, icon="🟣", card_class="usage-card")
+        show_table_in_card("常用用法", usage_rows, icon="🟣", css_class="soft-card-purple")
 
 
 # ============================================================
