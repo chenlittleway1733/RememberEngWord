@@ -52,62 +52,18 @@ def get_audio_file(text: str) -> Path | None:
 
 
 def autoplay_audio(audio_path: Path | None):
-    """
-    自動播放音檔。
-
-    修正版重點：
-    1. 播放新音檔前，先停止頁面上既有的 audio。
-    2. 避免聽力測驗進入下一題時，上一題音檔還沒停止，造成「先唸上一題、再唸本題」。
-    3. 使用 components.html 執行少量 JavaScript，主動停止舊音檔。
-    """
+    """自動播放音檔。"""
     if audio_path is None or not audio_path.exists():
         return
 
-    import streamlit.components.v1 as components
-
     audio_bytes = audio_path.read_bytes()
     audio_base64 = base64.b64encode(audio_bytes).decode()
-
     audio_html = f"""
-    <script>
-    function stopAllAudio(doc) {{
-        try {{
-            const audios = doc.querySelectorAll('audio');
-            audios.forEach(function(a) {{
-                try {{
-                    a.pause();
-                    a.currentTime = 0;
-                    a.src = '';
-                    a.remove();
-                }} catch (e) {{}}
-            }});
-
-            const iframes = doc.querySelectorAll('iframe');
-            iframes.forEach(function(frame) {{
-                try {{
-                    if (frame.contentWindow && frame.contentWindow.document) {{
-                        stopAllAudio(frame.contentWindow.document);
-                    }}
-                }} catch (e) {{}}
-            }});
-        }} catch (e) {{}}
-    }}
-
-    try {{
-        stopAllAudio(window.parent.document);
-    }} catch (e) {{
-        stopAllAudio(document);
-    }}
-
-    const audio = new Audio("data:audio/mp3;base64,{audio_base64}");
-    audio.autoplay = true;
-    audio.play().catch(function(e) {{
-        console.log("Autoplay was blocked or interrupted:", e);
-    }});
-    </script>
+    <audio autoplay>
+        <source src="data:audio/mp3;base64,{audio_base64}" type="audio/mp3">
+    </audio>
     """
-
-    components.html(audio_html, height=0, width=0)
+    st.markdown(audio_html, unsafe_allow_html=True)
 
 def audio_button(text: str, label: str, key: str):
     """顯示播放按鈕。"""
