@@ -7,11 +7,12 @@ import sqlite3
 from datetime import date, datetime, timedelta
 import base64
 import html
+import random
 import io
 
 # ============================================================
 # 國中英文單字智慧複習系統
-# app_v15.py
+# app_v16.py
 #
 # 本版方向：
 # 回到 SQLite + 下載備份，不使用 Google Sheets。
@@ -719,6 +720,295 @@ def update_progress(user_id: str, word_row: pd.Series, level: str):
     conn.close()
 
 
+def ensure_quiz_log_table():
+    """確保 quiz_log 測驗紀錄表存在。"""
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS quiz_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id TEXT NOT NULL,
+            word_id TEXT NOT NULL,
+            word TEXT,
+            quiz_type TEXT,
+            question TEXT,
+            correct_answer TEXT,
+            user_answer TEXT,
+            is_correct INTEGER,
+            created_at TEXT
+        )
+        """
+    )
+    conn.commit()
+    conn.close()
+
+
+def log_quiz_result(user_id: str, word_row: pd.Series, quiz_type: str, question: str,
+                    correct_answer: str, user_answer: str, is_correct: bool):
+    """寫入一次測驗作答紀錄。"""
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        INSERT INTO quiz_log
+        (user_id, word_id, word, quiz_type, question, correct_answer, user_answer, is_correct, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            user_id,
+            safe_str(word_row.get("word_id", "")),
+            safe_str(word_row.get("word", "")),
+            quiz_type,
+            question,
+            correct_answer,
+            user_answer,
+            1 if is_correct else 0,
+            datetime.now().isoformat(timespec="seconds"),
+        )
+    )
+    conn.commit()
+    conn.close()
+
+
+def load_quiz_log(user_id: str | None = None) -> pd.DataFrame:
+    """讀取測驗紀錄。"""
+    conn = get_conn()
+    if user_id:
+        df = pd.read_sql_query(
+            "SELECT * FROM quiz_log WHERE user_id = ? ORDER BY id DESC",
+            conn,
+            params=(user_id,)
+        )
+    else:
+        df = pd.read_sql_query("SELECT * FROM quiz_log ORDER BY id DESC", conn)
+    conn.close()
+    return df
+
+
+def split_options(option_text: str) -> list[str]:
+    """
+    有些答案可能用 / 分隔，例如 was / were。
+    選擇題可視需要拆開，但本版先保留完整答案字串。
+    """
+    return [safe_str(option_text)] if safe_str(option_text) else []
+
+
+def make_choice_options(correct_answer: str, distractors: list[str]) -> list[str]:
+    """產生選擇題選項，包含正確答案與誘答，並隨機排序。"""
+    options = []
+    correct_answer = safe_str(correct_answer)
+    if correct_answer:
+        options.append(correct_answer)
+
+    for item in distractors:
+        item = safe_str(item)
+        if item and item not in options:
+            options.append(item)
+
+    # 保底：如果資料表誘答不足，就補空避免錯誤；實際出題時會檢查選項數。
+    options = options[:4]
+    random.shuffle(options)
+    return options
+
+
+def get_quiz_pool(source_df: pd.DataFrame, quiz_type: str) -> pd.DataFrame:
+    """
+    依題型過濾可出題單字。
+    """
+    df = source_df.copy()
+
+    if quiz_type in ["英翻中選擇題", "中翻英選擇題"]:
+        return df[df["word"].astype(str).str.strip() != ""]
+
+    if quiz_type == "動詞變化選擇題":
+        pos_text = (
+            df.get("pos", "").astype(str).str.lower() + 
+            df.get("pos_en", "").astype(str).str.lower() + 
+            df.get("pos_zh", "").astype(str)
+        )
+        return df[
+            (pos_text.str.contains("verb") | pos_text.str.contains("動詞")) &
+            (
+                (df.get("past", "").astype(str).str.strip() != "") |
+                (df.get("past_participle", "").astype(str).str.strip() != "") |
+                (df.get("present_participle", "").astype(str).str.strip() != "")
+            )
+        ]
+
+    if quiz_type == "例句填空":
+        cloze_cols = [f"cloze_{i}" for i in range(1, 6) if f"cloze_{i}" in df.columns]
+        if not cloze_cols:
+            return df.iloc[0:0]
+        mask = False
+        for col in cloze_cols:
+            mask = mask | (df[col].astype(str).str.strip() != "")
+        return df[mask]
+
+    return df
+
+
+def build_quiz_question(word_row: pd.Series, quiz_type: str) -> dict:
+    """
+    從 words.csv 的欄位建立一道題目。
+    回傳 dict：
+    {
+        quiz_type, question, correct_answer, options, hint
+    }
+    """
+    word = safe_str(word_row.get("word", ""))
+    meaning = safe_str(word_row.get("meaning", ""))
+
+    if quiz_type == "英翻中選擇題":
+        distractors = [
+            word_row.get("meaning_option_1", ""),
+            word_row.get("meaning_option_2", ""),
+            word_row.get("meaning_option_3", ""),
+        ]
+        return {
+            "quiz_type": quiz_type,
+            "question": f"「{word}」的中文意思是？",
+            "correct_answer": meaning,
+            "options": make_choice_options(meaning, distractors),
+            "hint": "",
+        }
+
+    if quiz_type == "中翻英選擇題":
+        context = safe_str(word_row.get("word_question_context", ""))
+        if context:
+            question = f"請選出正確英文：{context}"
+        else:
+            question = f"「{meaning}」的英文是？"
+
+        distractors = [
+            word_row.get("word_option_1", ""),
+            word_row.get("word_option_2", ""),
+            word_row.get("word_option_3", ""),
+        ]
+        return {
+            "quiz_type": quiz_type,
+            "question": question,
+            "correct_answer": word,
+            "options": make_choice_options(word, distractors),
+            "hint": "",
+        }
+
+    if quiz_type == "動詞變化選擇題":
+        candidates = []
+
+        if safe_str(word_row.get("past", "")):
+            candidates.append((
+                "過去式",
+                safe_str(word_row.get("past", "")),
+                [
+                    word_row.get("past_option_1", ""),
+                    word_row.get("past_option_2", ""),
+                    word_row.get("past_option_3", ""),
+                ]
+            ))
+
+        if safe_str(word_row.get("past_participle", "")):
+            candidates.append((
+                "過去分詞",
+                safe_str(word_row.get("past_participle", "")),
+                [
+                    word_row.get("past_participle_option_1", ""),
+                    word_row.get("past_participle_option_2", ""),
+                    word_row.get("past_participle_option_3", ""),
+                ]
+            ))
+
+        if safe_str(word_row.get("present_participle", "")):
+            candidates.append((
+                "現在分詞",
+                safe_str(word_row.get("present_participle", "")),
+                [
+                    word_row.get("present_participle_option_1", ""),
+                    word_row.get("present_participle_option_2", ""),
+                    word_row.get("present_participle_option_3", ""),
+                ]
+            ))
+
+        if safe_str(word_row.get("verb_change_type", "")):
+            candidates.append((
+                "變化規則",
+                safe_str(word_row.get("verb_change_type", "")),
+                [
+                    word_row.get("verb_change_option_1", ""),
+                    word_row.get("verb_change_option_2", ""),
+                    word_row.get("verb_change_option_3", ""),
+                ]
+            ))
+
+        if not candidates:
+            return {}
+
+        item_name, correct, distractors = random.choice(candidates)
+        base_form = safe_str(word_row.get("base_form", "")) or word
+
+        if item_name == "變化規則":
+            question = f"「{word}」的動詞變化屬於哪一種？"
+            hint = safe_str(word_row.get("verb_change_note", ""))
+        else:
+            question = f"「{base_form}」的{item_name}是？"
+            hint = safe_str(word_row.get("verb_change_note", ""))
+
+        return {
+            "quiz_type": quiz_type,
+            "question": question,
+            "correct_answer": correct,
+            "options": make_choice_options(correct, distractors),
+            "hint": hint,
+        }
+
+    if quiz_type == "例句填空":
+        available = []
+        for i in range(1, 6):
+            c = safe_str(word_row.get(f"cloze_{i}", ""))
+            a = safe_str(word_row.get(f"cloze_answer_{i}", ""))
+            h = safe_str(word_row.get(f"cloze_hint_{i}", ""))
+            if c and a:
+                available.append((c, a, h))
+        if not available:
+            return {}
+
+        cloze, answer, hint = random.choice(available)
+        return {
+            "quiz_type": quiz_type,
+            "question": cloze,
+            "correct_answer": answer,
+            "options": [],
+            "hint": hint,
+        }
+
+    return {}
+
+
+def normalize_answer(value: str) -> str:
+    """比對答案用：去空白、轉小寫。"""
+    return safe_str(value).strip().lower()
+
+
+def prepare_new_quiz_question(source_df: pd.DataFrame, quiz_type: str):
+    """建立新測驗題，存進 session_state。"""
+    pool = get_quiz_pool(source_df, quiz_type)
+    if pool.empty:
+        st.session_state.quiz_current = {}
+        return
+
+    word_row = pool.sample(1).iloc[0]
+    question = build_quiz_question(word_row, quiz_type)
+
+    if not question:
+        st.session_state.quiz_current = {}
+        return
+
+    question["word_row"] = word_row.to_dict()
+    st.session_state.quiz_current = question
+    st.session_state.quiz_answered = False
+    st.session_state.quiz_feedback = ""
+
+
 def import_user_progress_from_csv(user_id: str, csv_df: pd.DataFrame, import_mode: str = "replace") -> tuple[bool, str]:
     """
     匯入單一使用者的學習紀錄 CSV。
@@ -831,6 +1121,7 @@ if words_df.empty:
     st.stop()
 
 init_db()
+ensure_quiz_log_table()
 ensure_progress_for_words(words_df)
 
 users_df = load_users()
@@ -1077,7 +1368,7 @@ st.sidebar.write(f"已掌握：**{mastered}**")
 
 st.markdown('<div class="main-title">📘 國中英文單字複習</div>', unsafe_allow_html=True)
 st.markdown(
-    '<div class="small-caption">第二階段：SQLite 學習紀錄 + 穩定介面美化 + 動詞變化發音 + 舊資料庫自動遷移</div>',
+    '<div class="small-caption">第三階段：選擇題測驗 + 例句填空 + quiz_log 測驗紀錄 + 舊資料庫自動遷移</div>',
     unsafe_allow_html=True
 )
 
@@ -1089,6 +1380,14 @@ metric_col4.metric("已掌握", mastered)
 
 st.caption(
     f"使用者：{selected_user_name}　｜　目前範圍：{selected_grade} / {selected_semester} / {selected_lesson} / {selected_pos}　｜　模式：{mode}"
+)
+
+app_mode = st.radio(
+    "功能模式",
+    ["單字卡學習", "測驗模式"],
+    horizontal=True,
+    index=0,
+    key="app_mode"
 )
 
 if filtered_df.empty:
@@ -1127,7 +1426,172 @@ current_progress = get_progress(selected_user_id, current_word_id)
 
 
 # ============================================================
-# 15. 自動播放單字
+# 15. 測驗模式
+# ============================================================
+
+if app_mode == "測驗模式":
+    st.subheader("📝 測驗模式")
+
+    quiz_col1, quiz_col2, quiz_col3 = st.columns([1, 1, 1])
+
+    with quiz_col1:
+        quiz_type = st.selectbox(
+            "題型",
+            ["英翻中選擇題", "中翻英選擇題", "動詞變化選擇題", "例句填空"],
+            key="quiz_type"
+        )
+
+    with quiz_col2:
+        quiz_source = st.selectbox(
+            "出題來源",
+            ["目前範圍", "今日複習", "未學單字", "學習中"],
+            key="quiz_source"
+        )
+
+    with quiz_col3:
+        st.write("")
+        st.write("")
+        new_question = st.button("產生新題目", use_container_width=True, key="new_quiz_question")
+
+    # 依出題來源決定題庫
+    if quiz_source == "目前範圍":
+        quiz_source_df = filtered_df.copy()
+    elif quiz_source == "今日複習":
+        quiz_source_df = merged_df[
+            (merged_df["next_review"].astype(str) == "") |
+            (merged_df["next_review"].astype(str) <= today_str)
+        ].copy()
+    elif quiz_source == "未學單字":
+        quiz_source_df = merged_df[merged_df["status"].astype(str).isin(["", "未學"])].copy()
+    else:
+        quiz_source_df = merged_df[merged_df["status"].astype(str).isin(["學習中", "熟悉"])].copy()
+
+    quiz_pool = get_quiz_pool(quiz_source_df, quiz_type)
+    st.info(f"目前題庫共有 {len(quiz_pool)} 個可出題單字。")
+
+    # 題型或來源變更時，自動清掉舊題
+    quiz_signature = hashlib.md5(
+        f"{selected_user_id}|{quiz_type}|{quiz_source}|{selected_grade}|{selected_semester}|{selected_lesson}|{selected_pos}|{keyword}".encode("utf-8")
+    ).hexdigest()
+
+    if "last_quiz_signature" not in st.session_state:
+        st.session_state.last_quiz_signature = quiz_signature
+
+    if st.session_state.last_quiz_signature != quiz_signature:
+        st.session_state.quiz_current = {}
+        st.session_state.quiz_answered = False
+        st.session_state.quiz_feedback = ""
+        st.session_state.last_quiz_signature = quiz_signature
+
+    if "quiz_current" not in st.session_state:
+        st.session_state.quiz_current = {}
+
+    if new_question or not st.session_state.quiz_current:
+        prepare_new_quiz_question(quiz_source_df, quiz_type)
+
+    current_quiz = st.session_state.get("quiz_current", {})
+
+    if not current_quiz:
+        st.warning("目前範圍沒有足夠資料可以產生這種題型。請確認 words.csv 已有測驗欄位，或換其他題型。")
+        st.stop()
+
+    st.divider()
+
+    st.markdown("### 題目")
+    st.markdown(f"**{current_quiz['question']}**")
+
+    if current_quiz.get("hint"):
+        st.caption(f"提示：{current_quiz['hint']}")
+
+    # 題目發音
+    q_word_row = pd.Series(current_quiz["word_row"])
+    q_word = safe_str(q_word_row.get("word", ""))
+    if q_word:
+        audio_button(q_word, "🔊 播放題目單字", key=f"quiz_word_audio_{selected_user_id}_{q_word_row.get('word_id','')}")
+
+    # 作答區
+    user_answer = ""
+
+    if current_quiz["quiz_type"] in ["英翻中選擇題", "中翻英選擇題", "動詞變化選擇題"]:
+        options = current_quiz.get("options", [])
+        if len(options) < 2:
+            st.warning("這題選項不足，請檢查 words.csv 的誘答欄位。")
+            if st.button("換一題", key="bad_question_next"):
+                prepare_new_quiz_question(quiz_source_df, quiz_type)
+                st.rerun()
+            st.stop()
+
+        user_answer = st.radio(
+            "請選擇答案",
+            options,
+            key=f"quiz_choice_{selected_user_id}_{current_quiz['question']}"
+        )
+
+    elif current_quiz["quiz_type"] == "例句填空":
+        st.write("請依提示輸入完整答案：")
+        user_answer = st.text_input(
+            "答案",
+            key=f"quiz_input_{selected_user_id}_{current_quiz['question']}"
+        )
+
+    submit_col1, submit_col2 = st.columns([1, 1])
+
+    with submit_col1:
+        submit_answer = st.button("送出答案", use_container_width=True, key="submit_quiz_answer")
+
+    with submit_col2:
+        if st.button("跳過 / 換一題", use_container_width=True, key="skip_quiz_question"):
+            prepare_new_quiz_question(quiz_source_df, quiz_type)
+            st.rerun()
+
+    if submit_answer:
+        correct_answer = safe_str(current_quiz["correct_answer"])
+
+        if current_quiz["quiz_type"] == "例句填空":
+            is_correct = normalize_answer(user_answer) == normalize_answer(correct_answer)
+        else:
+            is_correct = safe_str(user_answer) == correct_answer
+
+        # 寫入測驗紀錄
+        log_quiz_result(
+            selected_user_id,
+            q_word_row,
+            current_quiz["quiz_type"],
+            current_quiz["question"],
+            correct_answer,
+            user_answer,
+            is_correct
+        )
+
+        # 更新記憶曲線
+        if is_correct:
+            update_progress(selected_user_id, q_word_row, "good")
+            st.success(f"答對了！正確答案：{correct_answer}")
+        else:
+            update_progress(selected_user_id, q_word_row, "forgot")
+            st.error(f"答錯了。你的答案：{user_answer}；正確答案：{correct_answer}")
+
+        st.session_state.quiz_answered = True
+
+    if st.session_state.get("quiz_answered", False):
+        if st.button("下一題", use_container_width=True, key="next_quiz_after_answer"):
+            prepare_new_quiz_question(quiz_source_df, quiz_type)
+            st.rerun()
+
+    st.divider()
+
+    with st.expander("查看最近測驗紀錄"):
+        quiz_log_df = load_quiz_log(selected_user_id)
+        if quiz_log_df.empty:
+            st.info("目前還沒有測驗紀錄。")
+        else:
+            st.dataframe(quiz_log_df.head(30), use_container_width=True, hide_index=True)
+
+    st.stop()
+
+
+# ============================================================
+# 16. 自動播放單字
 # ============================================================
 
 if "last_autoplay_word_id" not in st.session_state:
@@ -1353,6 +1817,7 @@ with st.expander("備份 / 上傳更新學習紀錄"):
 
     all_progress = load_progress()
     selected_progress = load_progress(selected_user_id)
+    selected_quiz_log = load_quiz_log(selected_user_id)
 
     tab_download, tab_upload_user, tab_upload_db = st.tabs([
         "下載備份",
@@ -1374,6 +1839,15 @@ with st.expander("備份 / 上傳更新學習紀錄"):
             file_name=f"{selected_user_id}_progress_backup.csv",
             mime="text/csv",
             key=f"download_csv_{selected_user_id}"
+        )
+
+        quiz_csv_bytes = selected_quiz_log.to_csv(index=False).encode("utf-8-sig")
+        st.download_button(
+            label=f"下載 {selected_user_name} 的測驗紀錄 CSV",
+            data=quiz_csv_bytes,
+            file_name=f"{selected_user_id}_quiz_log_backup.csv",
+            mime="text/csv",
+            key=f"download_quiz_log_{selected_user_id}"
         )
 
         all_csv_bytes = all_progress.to_csv(index=False).encode("utf-8-sig")
