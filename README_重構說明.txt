@@ -134,3 +134,9 @@
 - 快速備份區文字改為完整備份包含 progress、quiz_log、error_notebook、memory_log
 - Google Sheets 讀取備份時會顯示記憶曲線歷程 memory_log 筆數
 - 上傳本機完整備份 JSON 時也會顯示 memory_log 筆數
+
+
+更新：單字卡版面順序調整
+- 詞性說明移到「重聽單字」按鈕上方
+- 上一個 / 下一個移到「重聽單字」按鈕下方
+- 學習狀態與等級挑戰區塊移到導覽按鈕下方

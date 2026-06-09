@@ -201,16 +201,40 @@ def render_vocab_card_page(merged_df: pd.DataFrame, user_id: str, user_name: str
             unsafe_allow_html=True
         )
         st.write("")
-        audio_button(safe_str(current_word["word"]), "🔊 重聽單字", key=f"word_audio_{user_id}_{current_word_id}")
 
-        st.divider()
+        # 詞性說明上移到「重聽單字」按鈕上方
         st.write(f"**詞性：** {safe_str(current_word.get('pos', ''))}")
         if safe_str(current_word.get("pos_note", "")):
             st.caption(safe_str(current_word.get("pos_note", "")))
 
+        # 單字發音
+        audio_button(safe_str(current_word["word"]), "🔊 重聽單字", key=f"word_audio_{user_id}_{current_word_id}")
+
+        # 上一個 / 下一個按鈕移到「重聽單字」下方
+        nav1, nav2, nav3 = st.columns([1, 1.2, 1])
+
+        with nav1:
+            if st.button("⬅️ 上一個", use_container_width=True):
+                st.session_state.card_index -= 1
+                if st.session_state.card_index < 0:
+                    st.session_state.card_index = len(filtered_df) - 1
+                st.rerun()
+
+        with nav2:
+            st.write(f"第 {st.session_state.card_index + 1} / {len(filtered_df)} 個")
+
+        with nav3:
+            if st.button("下一個 ➡️", use_container_width=True):
+                st.session_state.card_index += 1
+                if st.session_state.card_index >= len(filtered_df):
+                    st.session_state.card_index = 0
+                st.rerun()
+
+        st.divider()
+
         progress_rows = [
             ("使用者", user_name),
-            ("狀態", safe_str(current_progress.get("status", "未學"))),
+            ("狀態", safe_str(current_progress.get("status", "忘記了"))),
             ("熟練度", f"{safe_str(current_progress.get('mastery', 0))} / 100"),
             ("複習次數", safe_str(current_progress.get("review_count", 0))),
             ("答對次數", safe_str(current_progress.get("correct_count", 0))),
@@ -237,25 +261,6 @@ def render_vocab_card_page(merged_df: pd.DataFrame, user_id: str, user_name: str
             icon="🏅",
             css_class="soft-card-green"
         )
-        st.divider()
-        nav1, nav2, nav3 = st.columns([1, 1.2, 1])
-
-        with nav1:
-            if st.button("⬅️ 上一個", use_container_width=True):
-                st.session_state.card_index -= 1
-                if st.session_state.card_index < 0:
-                    st.session_state.card_index = len(filtered_df) - 1
-                st.rerun()
-
-        with nav2:
-            st.write(f"第 {st.session_state.card_index + 1} / {len(filtered_df)} 個")
-
-        with nav3:
-            if st.button("下一個 ➡️", use_container_width=True):
-                st.session_state.card_index += 1
-                if st.session_state.card_index >= len(filtered_df):
-                    st.session_state.card_index = 0
-                st.rerun()
 
         st.markdown('</div>', unsafe_allow_html=True)
 
