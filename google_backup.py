@@ -1,15 +1,20 @@
 """
 google_backup.py
-Google Sheets 雲端備份功能。
+Google Sheets 雲端資料庫備份功能。
 
-本檔案負責透過 Google Apps Script Web App 讀寫完整備份 JSON。
+新版設計：
+不再把所有資料塞進單一 backup_json 儲存格。
+改成將資料展開到 Google Sheets 多個工作表：
 
-需要在 Streamlit Secrets 設定：
-GOOGLE_SCRIPT_URL = "https://script.google.com/macros/s/xxxx/exec"
-GOOGLE_BACKUP_TOKEN = "你的token"
+1. progress      每個帳號、每個單字目前狀態
+2. quiz_log      每次測驗紀錄
+3. memory_log    每次升級 / 降級 / 連續答對歷程
+4. backup_meta   每個帳號最後同步摘要
+
+仍然保留本機完整 JSON 下載 / 上傳功能。
+Google Sheets 主要作為可讀、可還原的雲端資料庫。
 """
 
-import json
 import requests
 import streamlit as st
 
@@ -27,72 +32,75 @@ def is_google_backup_configured() -> bool:
     return bool(script_url and token)
 
 
-def save_user_backup_to_google(user_id: str, user_name: str, backup_json_text: str) -> tuple[bool, str, dict]:
-    """將單一使用者完整備份 JSON 上傳到 Google Sheets。"""
+def _post_to_google(payload: dict) -> tuple[bool, str, dict]:
+    """送出 POST 到 Google Apps Script Web App。"""
     script_url, token = get_google_backup_config()
 
     if not script_url or not token:
         return False, "尚未設定 GOOGLE_SCRIPT_URL 或 GOOGLE_BACKUP_TOKEN。", {}
 
-    payload = {
-        "token": token,
-        "action": "save_backup",
-        "user_id": user_id,
-        "user_name": user_name,
-        "backup_json": backup_json_text,
-    }
+    payload = dict(payload)
+    payload["token"] = token
 
     try:
-        resp = requests.post(script_url, json=payload, timeout=30)
+        resp = requests.post(script_url, json=payload, timeout=60)
         resp.raise_for_status()
         data = resp.json()
 
         if data.get("ok"):
-            return True, data.get("message", "已上傳到 Google Sheets。"), data
+            return True, data.get("message", "Google Sheets 操作成功。"), data
 
         return False, data.get("message", "Google Sheets 回傳失敗。"), data
 
     except Exception as e:
-        return False, f"上傳 Google Sheets 失敗：{e}", {}
+        return False, f"連線 Google Sheets 失敗：{e}", {}
 
 
-def load_user_backup_from_google(user_id: str) -> tuple[bool, str, dict]:
-    """從 Google Sheets 讀取單一使用者完整備份 JSON。"""
-    script_url, token = get_google_backup_config()
+def save_user_tables_to_google(
+    user_id: str,
+    user_name: str,
+    progress_records: list[dict],
+    quiz_log_records: list[dict],
+    memory_log_records: list[dict],
+) -> tuple[bool, str, dict]:
+    """
+    將單一使用者資料分表寫入 Google Sheets。
 
-    if not script_url or not token:
-        return False, "尚未設定 GOOGLE_SCRIPT_URL 或 GOOGLE_BACKUP_TOKEN。", {}
-
+    寫入方式：
+    1. 先刪除該 user_id 舊資料
+    2. 再寫入新的 progress / quiz_log / memory_log
+    3. 更新 backup_meta
+    """
     payload = {
-        "token": token,
-        "action": "load_backup",
+        "action": "save_tables",
+        "user_id": user_id,
+        "user_name": user_name,
+        "progress": progress_records,
+        "quiz_log": quiz_log_records,
+        "memory_log": memory_log_records,
+    }
+
+    return _post_to_google(payload)
+
+
+def load_user_tables_from_google(user_id: str) -> tuple[bool, str, dict]:
+    """
+    從 Google Sheets 讀取單一使用者分表資料。
+
+    回傳格式：
+    {
+        "backup_type": "vocab_app_google_tables",
+        "version": "2.0",
+        "user_id": "...",
+        "user_name": "...",
+        "progress": [...],
+        "quiz_log": [...],
+        "memory_log": [...]
+    }
+    """
+    payload = {
+        "action": "load_tables",
         "user_id": user_id,
     }
 
-    try:
-        resp = requests.post(script_url, json=payload, timeout=30)
-        resp.raise_for_status()
-        data = resp.json()
-
-        if not data.get("ok"):
-            return False, data.get("message", "Google Sheets 找不到備份。"), {}
-
-        backup_json = data.get("backup_json", "")
-
-        if not backup_json:
-            return False, "Google Sheets 中的 backup_json 是空的。", {}
-
-        if isinstance(backup_json, dict):
-            backup_data = backup_json
-        else:
-            backup_data = json.loads(backup_json)
-
-        if backup_data.get("backup_type") != "vocab_app_user_backup":
-            return False, "讀到的 JSON 不是本系統完整備份格式。", {}
-
-        return True, data.get("message", "已從 Google Sheets 讀取備份。"), backup_data
-
-    except json.JSONDecodeError:
-        return False, "Google Sheets 中的 backup_json 格式錯誤，無法解析 JSON。", {}
-    except Exception as e:
-        return False, f"讀取 Google Sheets 備份失敗：{e}", {}
+    return _post_to_google(payload)

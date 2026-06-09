@@ -140,3 +140,15 @@
 - 詞性說明移到「重聽單字」按鈕上方
 - 上一個 / 下一個移到「重聽單字」按鈕下方
 - 學習狀態與等級挑戰區塊移到導覽按鈕下方
+
+
+更新：Google Sheets 多工作表資料庫版
+- 不再把所有資料塞進 backup_json 單一儲存格
+- Google Sheets 會建立 / 使用四張表：
+  1. progress：每個單字目前學習狀態
+  2. quiz_log：每次測驗紀錄
+  3. memory_log：每次等級變化與記憶曲線歷程
+  4. backup_meta：各帳號最後同步摘要
+- 保留本機完整 JSON 下載 / 上傳功能
+- Google Sheets 可直接查看每個單字的狀態與記憶曲線紀錄
+- Apps Script 需更新為 google_apps_script_備份API範本.txt 的新版內容

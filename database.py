@@ -968,3 +968,114 @@ def restore_full_db(uploaded_file) -> tuple[bool, str]:
 
     except Exception as e:
         return False, f"還原失敗：{e}"
+
+
+def export_user_tables_backup(user_id: str) -> dict:
+    """
+    匯出 Google Sheets 分表備份資料。
+
+    不輸出 error_notebook，因為錯題本可由 quiz_log 即時計算。
+    """
+    progress_df = load_progress(user_id)
+    quiz_log_df = load_quiz_log(user_id)
+    memory_log_df = load_memory_log(user_id)
+
+    return {
+        "progress": progress_df.to_dict(orient="records"),
+        "quiz_log": quiz_log_df.to_dict(orient="records"),
+        "memory_log": memory_log_df.to_dict(orient="records"),
+    }
+
+
+def import_user_tables_backup(user_id: str, tables_data: dict) -> tuple[bool, str]:
+    """
+    從 Google Sheets 分表資料還原單一使用者紀錄。
+
+    固定覆蓋目前使用者：
+    1. 覆蓋 progress
+    2. 覆蓋 quiz_log
+    3. 覆蓋 memory_log
+    """
+    progress_records = tables_data.get("progress", [])
+    quiz_log_records = tables_data.get("quiz_log", [])
+    memory_log_records = tables_data.get("memory_log", [])
+
+    if not isinstance(progress_records, list):
+        return False, "Google Sheets progress 格式不正確。"
+    if not isinstance(quiz_log_records, list):
+        return False, "Google Sheets quiz_log 格式不正確。"
+    if not isinstance(memory_log_records, list):
+        return False, "Google Sheets memory_log 格式不正確。"
+
+    # progress
+    progress_df = pd.DataFrame(progress_records)
+    if not progress_df.empty:
+        ok, msg = import_user_progress_from_csv(user_id, progress_df, import_mode="replace")
+        if not ok:
+            return False, f"progress 還原失敗：{msg}"
+    else:
+        conn = get_conn()
+        cur = conn.cursor()
+        cur.execute("DELETE FROM progress WHERE user_id = ?", (user_id,))
+        conn.commit()
+        conn.close()
+
+    # quiz_log
+    quiz_df = pd.DataFrame(quiz_log_records)
+    if not quiz_df.empty:
+        ok, msg = import_user_quiz_log_from_csv(user_id, quiz_df)
+        if not ok:
+            return False, f"quiz_log 還原失敗：{msg}"
+    else:
+        conn = get_conn()
+        cur = conn.cursor()
+        cur.execute("DELETE FROM quiz_log WHERE user_id = ?", (user_id,))
+        conn.commit()
+        conn.close()
+
+    # memory_log
+    ensure_memory_log_table()
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("DELETE FROM memory_log WHERE user_id = ?", (user_id,))
+
+    for row in memory_log_records:
+        word_id = safe_str(row.get("word_id", ""))
+        if not word_id:
+            continue
+
+        cur.execute(
+            """
+            INSERT INTO memory_log
+            (user_id, word_id, word, source, event_type, is_correct,
+             old_status, new_status, old_streak_correct, new_streak_correct,
+             status_changed, change_direction, note, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                user_id,
+                word_id,
+                safe_str(row.get("word", "")),
+                safe_str(row.get("source", "")),
+                safe_str(row.get("event_type", "")),
+                safe_int(row.get("is_correct", 0)),
+                normalize_status(row.get("old_status", "忘記了")),
+                normalize_status(row.get("new_status", row.get("status", "忘記了"))),
+                safe_int(row.get("old_streak_correct", 0)),
+                safe_int(row.get("new_streak_correct", 0)),
+                safe_int(row.get("status_changed", 0)),
+                safe_str(row.get("change_direction", "")),
+                safe_str(row.get("note", "")),
+                safe_str(row.get("created_at", "")) or datetime.now().isoformat(timespec="seconds"),
+            )
+        )
+
+    conn.commit()
+    conn.close()
+
+    return True, (
+        f"已從 Google Sheets 分表還原："
+        f"progress {len(progress_records)} 筆，"
+        f"quiz_log {len(quiz_log_records)} 筆，"
+        f"memory_log {len(memory_log_records)} 筆。"
+    )

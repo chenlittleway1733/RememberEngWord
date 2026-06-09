@@ -17,12 +17,14 @@ from database import (
     import_user_quiz_log_from_csv,
     export_user_combined_backup,
     import_user_combined_backup,
+    export_user_tables_backup,
+    import_user_tables_backup,
     restore_full_db,
 )
 from google_backup import (
     is_google_backup_configured,
-    save_user_backup_to_google,
-    load_user_backup_from_google,
+    save_user_tables_to_google,
+    load_user_tables_from_google,
 )
 
 
@@ -228,7 +230,7 @@ def render_sidebar_quick_backup(user_id: str, user_name: str):
                         key=f"sidebar_start_full_backup_import_{user_id}",
                         use_container_width=True
                     ):
-                        ok, msg = import_user_combined_backup(user_id, backup_data)
+                        ok, msg = import_user_tables_backup(user_id, backup_data)
                         if ok:
                             st.success(msg)
                             st.rerun()
@@ -246,71 +248,74 @@ def render_sidebar_quick_backup(user_id: str, user_name: str):
             if not is_google_backup_configured():
                 st.warning("尚未設定 Google Sheets 雲端備份。請先在 Streamlit Secrets 設定 GOOGLE_SCRIPT_URL 與 GOOGLE_BACKUP_TOKEN。")
             else:
-                st.caption("可將目前使用者完整備份存到 Google Sheets，也可從 Google Sheets 讀回還原。完整備份包含學習狀態、測驗紀錄、錯題本快照與記憶曲線歷程。")
+                st.caption("可將目前使用者資料分表存到 Google Sheets，也可從 Google Sheets 分表讀回還原。Google Sheets 會建立 progress、quiz_log、memory_log、backup_meta，方便直接查看。")
 
                 if st.button(
-                    f"☁️ 上傳{user_name}完整備份到 Google Sheets",
+                    f"☁️ 同步{user_name}資料到 Google Sheets",
                     key=f"sidebar_google_upload_{user_id}",
                     use_container_width=True
                 ):
                     try:
-                        backup_bytes = export_user_combined_backup(user_id, user_name)
-                        backup_text = backup_bytes.decode("utf-8")
+                        tables = export_user_tables_backup(user_id)
 
-                        ok, msg, _ = save_user_backup_to_google(
+                        ok, msg, data = save_user_tables_to_google(
                             user_id=user_id,
                             user_name=user_name,
-                            backup_json_text=backup_text
+                            progress_records=tables.get("progress", []),
+                            quiz_log_records=tables.get("quiz_log", []),
+                            memory_log_records=tables.get("memory_log", []),
                         )
 
                         if ok:
                             st.success(msg)
+                            st.write(f"progress：{len(tables.get('progress', []))} 筆")
+                            st.write(f"quiz_log：{len(tables.get('quiz_log', []))} 筆")
+                            st.write(f"memory_log：{len(tables.get('memory_log', []))} 筆")
                         else:
                             st.error(msg)
 
                     except Exception as e:
-                        st.error(f"產生或上傳雲端備份失敗：{e}")
+                        st.error(f"產生或上傳 Google Sheets 分表資料失敗：{e}")
 
                 st.divider()
 
                 if st.button(
-                    f"☁️ 從 Google Sheets 讀取{user_name}備份",
+                    f"☁️ 從 Google Sheets 讀取{user_name}分表資料",
                     key=f"sidebar_google_load_{user_id}",
                     use_container_width=True
                 ):
-                    ok, msg, backup_data = load_user_backup_from_google(user_id)
+                    ok, msg, backup_data = load_user_tables_from_google(user_id)
 
                     if ok:
                         st.session_state[f"google_backup_preview_{user_id}"] = backup_data
                         st.success(msg)
                     else:
                         st.error(msg)
-                        st.info("如果 Google Sheets 備份有問題，請改用上方「上傳完整備份 JSON」還原本機備份檔。")
+                        st.info("如果 Google Sheets 分表資料有問題，請改用上方「上傳完整備份 JSON」還原本機備份檔。")
 
                 preview_key = f"google_backup_preview_{user_id}"
                 if preview_key in st.session_state:
                     backup_data = st.session_state[preview_key]
 
-                    st.write("雲端備份資訊：")
-                    st.write(f"匯出時間：{backup_data.get('exported_at', '')}")
+                    st.write("Google Sheets 分表資料資訊：")
+                    st.write(f"同步時間：{backup_data.get('exported_at', backup_data.get('synced_at', ''))}")
                     st.write(f"原使用者：{backup_data.get('user_name', '')}（{backup_data.get('user_id', '')}）")
-                    st.write(f"學習狀態 progress：{len(backup_data.get('progress', []))} 筆")
-                    st.write(f"測驗紀錄 quiz_log：{len(backup_data.get('quiz_log', []))} 筆")
-                    st.write(f"錯題本快照 error_notebook：{len(backup_data.get('error_notebook', []))} 筆")
-                    st.write(f"記憶曲線歷程 memory_log：{len(backup_data.get('memory_log', []))} 筆")
+                    st.write(f"progress：{len(backup_data.get('progress', []))} 筆")
+                    st.write(f"quiz_log：{len(backup_data.get('quiz_log', []))} 筆")
+                    st.write(f"memory_log：{len(backup_data.get('memory_log', []))} 筆")
 
                     confirm_cloud_restore = st.checkbox(
-                        f"確認用 Google Sheets 備份覆蓋{user_name}目前紀錄",
+                        f"確認用 Google Sheets 分表資料覆蓋{user_name}目前紀錄",
                         key=f"confirm_google_restore_{user_id}"
                     )
 
                     if st.button(
-                        "開始從 Google Sheets 還原",
+                        "開始從 Google Sheets 分表還原",
                         disabled=not confirm_cloud_restore,
                         key=f"start_google_restore_{user_id}",
                         use_container_width=True
                     ):
-                        ok, msg = import_user_combined_backup(user_id, backup_data)
+                        ok, msg = import_user_tables_backup(user_id, backup_data)
 
                         if ok:
                             st.success(msg)
@@ -626,7 +631,7 @@ def render_backup_section(user_id: str, user_name: str):
                     st.write(f"記憶曲線歷程 memory_log：{len(backup_data.get('memory_log', []))} 筆")
 
                     if st.button("開始覆蓋匯入完整備份", disabled=not confirm_combined_import, key=f"start_combined_import_{user_id}"):
-                        ok, msg = import_user_combined_backup(user_id, backup_data)
+                        ok, msg = import_user_tables_backup(user_id, backup_data)
                         if ok:
                             st.success(msg)
                             st.rerun()
