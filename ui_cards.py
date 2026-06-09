@@ -51,7 +51,15 @@ def show_verb_rows_with_audio(current_word: pd.Series, selected_user_id: str, cu
 
 
 def render_examples(current_word: pd.Series, selected_user_id: str, current_word_id: str):
-    """顯示例句，並自動播放第一句例句。"""
+    """
+    顯示例句。
+
+    新版設計：
+    1. 英文例句先顯示。
+    2. 中文翻譯預設隱藏。
+    3. 每一個例句都有「顯示中文 / 隱藏中文」按鈕。
+    4. 保留例句播放按鈕。
+    """
     st.divider()
     st.markdown('<div class="section-title">例句</div>', unsafe_allow_html=True)
 
@@ -82,17 +90,50 @@ def render_examples(current_word: pd.Series, selected_user_id: str, current_word
             st.session_state.last_autoplay_example_id = example_autoplay_id
 
     example_cols = st.columns(2)
+
     for idx, (num, en_text, zh_text) in enumerate(examples):
+        show_key = f"show_zh_{selected_user_id}_{current_word_id}_{num}"
+
+        if show_key not in st.session_state:
+            st.session_state[show_key] = False
+
         with example_cols[idx % 2]:
+            # 先顯示英文例句；中文先不顯示
             example_html = f"""
             <div class="example-card">
                 <div class="example-en">{num}. {html.escape(en_text)}</div>
-                <div class="example-zh">{html.escape(zh_text)}</div>
             </div>
             """
             st.markdown(example_html, unsafe_allow_html=True)
-            audio_button(en_text, f"🔊 播放例句 {num}", key=f"example_audio_{selected_user_id}_{current_word_id}_{num}")
 
+            # 播放例句
+            audio_button(
+                en_text,
+                f"🔊 播放例句 {num}",
+                key=f"example_audio_{selected_user_id}_{current_word_id}_{num}"
+            )
+
+            # 顯示 / 隱藏中文按鈕
+            if zh_text:
+                button_label = "🙈 隱藏中文" if st.session_state[show_key] else "👀 顯示中文"
+
+                if st.button(
+                    button_label,
+                    key=f"toggle_zh_{selected_user_id}_{current_word_id}_{num}",
+                    use_container_width=True
+                ):
+                    st.session_state[show_key] = not st.session_state[show_key]
+                    st.rerun()
+
+                if st.session_state[show_key]:
+                    st.markdown(
+                        f"""
+                        <div class="example-card">
+                            <div class="example-zh">{html.escape(zh_text)}</div>
+                        </div>
+                        """,
+                        unsafe_allow_html=True
+                    )
 
 def render_vocab_card_page(merged_df: pd.DataFrame, user_id: str, user_name: str, filter_state: dict):
     """單字卡學習頁面。"""
