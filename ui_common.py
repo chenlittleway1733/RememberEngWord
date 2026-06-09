@@ -485,26 +485,48 @@ def render_sidebar_filters(merged_df: pd.DataFrame) -> dict:
 
 
 def render_sidebar_stats(merged_df: pd.DataFrame, user_name: str):
-    """側邊欄：學習統計。"""
-    st.sidebar.divider()
-    st.sidebar.header("📊 學習統計")
+    """
+    側邊欄：顯示目前使用者的學習統計。
+
+    等級挑戰版統計：
+    - 忘記了
+    - 不熟
+    - 認識
+    - 很熟
+    """
     today_str = date.today().isoformat()
 
-    total_words = len(merged_df)
-    forgot = len(merged_df[merged_df["status"].astype(str) == "忘記了"])
-    hard = len(merged_df[merged_df["status"].astype(str) == "不熟"])
-    known = len(merged_df[merged_df["status"].astype(str) == "認識"])
-    mastered = len(merged_df[merged_df["status"].astype(str) == "很熟"])
+    if merged_df is None or merged_df.empty:
+        st.sidebar.divider()
+        st.sidebar.markdown("### 📊 學習統計")
+        st.sidebar.write("目前沒有學習紀錄。")
+        return
+
+    status_col = merged_df["status"].astype(str) if "status" in merged_df.columns else pd.Series([], dtype=str)
+
+    due_today = 0
+    if "next_review" in merged_df.columns:
+        due_today = len(
+            merged_df[
+                (merged_df["next_review"].astype(str) == "") |
+                (merged_df["next_review"].astype(str) <= today_str)
+            ]
+        )
+
+    forgot = len(merged_df[status_col == "忘記了"])
+    hard = len(merged_df[status_col == "不熟"])
+    known = len(merged_df[status_col == "認識"])
+    mastered = len(merged_df[status_col == "很熟"])
 
     st.sidebar.divider()
     st.sidebar.markdown("### 📊 學習統計")
+    st.sidebar.write(f"目前使用者：**{user_name}**")
     st.sidebar.write(f"這位使用者目前共有 **{len(merged_df)}** 筆學習紀錄。")
     st.sidebar.write(f"今日可複習：**{due_today}**")
     st.sidebar.write(f"忘記了：**{forgot}**")
     st.sidebar.write(f"不熟：**{hard}**")
     st.sidebar.write(f"認識：**{known}**")
     st.sidebar.write(f"很熟：**{mastered}**")
-
 
 def render_backup_section(user_id: str, user_name: str):
     """主畫面下方：完整備份 / 上傳區。"""
