@@ -194,8 +194,10 @@ def render_sidebar_quick_backup(user_id: str, user_name: str):
             use_container_width=True
         )
 
+        st.sidebar.caption("完整備份包含：學習狀態、測驗紀錄、錯題本快照、記憶曲線歷程。")
+
         with st.sidebar.expander(f"⬆️ 上傳{user_name}完整備份"):
-            st.caption("完整備份會同時覆蓋目前使用者的學習紀錄與測驗紀錄。")
+            st.caption("完整備份會同時覆蓋目前使用者的學習狀態、測驗紀錄與記憶曲線歷程。")
 
             uploaded_combined = st.file_uploader(
                 "選擇完整備份 JSON",
@@ -215,9 +217,10 @@ def render_sidebar_quick_backup(user_id: str, user_name: str):
                     st.write("備份檔資訊：")
                     st.write(f"匯出時間：{backup_data.get('exported_at', '')}")
                     st.write(f"原使用者：{backup_data.get('user_name', '')}（{backup_data.get('user_id', '')}）")
-                    st.write(f"學習紀錄：{len(backup_data.get('progress', []))} 筆")
-                    st.write(f"測驗紀錄：{len(backup_data.get('quiz_log', []))} 筆")
-                    st.write(f"錯題本快照：{len(backup_data.get('error_notebook', []))} 筆")
+                    st.write(f"學習狀態 progress：{len(backup_data.get('progress', []))} 筆")
+                    st.write(f"測驗紀錄 quiz_log：{len(backup_data.get('quiz_log', []))} 筆")
+                    st.write(f"錯題本快照 error_notebook：{len(backup_data.get('error_notebook', []))} 筆")
+                    st.write(f"記憶曲線歷程 memory_log：{len(backup_data.get('memory_log', []))} 筆")
 
                     if st.button(
                         "開始覆蓋匯入完整備份",
@@ -243,7 +246,7 @@ def render_sidebar_quick_backup(user_id: str, user_name: str):
             if not is_google_backup_configured():
                 st.warning("尚未設定 Google Sheets 雲端備份。請先在 Streamlit Secrets 設定 GOOGLE_SCRIPT_URL 與 GOOGLE_BACKUP_TOKEN。")
             else:
-                st.caption("可將目前使用者完整備份存到 Google Sheets，也可從 Google Sheets 讀回還原。")
+                st.caption("可將目前使用者完整備份存到 Google Sheets，也可從 Google Sheets 讀回還原。完整備份包含學習狀態、測驗紀錄、錯題本快照與記憶曲線歷程。")
 
                 if st.button(
                     f"☁️ 上傳{user_name}完整備份到 Google Sheets",
@@ -291,9 +294,10 @@ def render_sidebar_quick_backup(user_id: str, user_name: str):
                     st.write("雲端備份資訊：")
                     st.write(f"匯出時間：{backup_data.get('exported_at', '')}")
                     st.write(f"原使用者：{backup_data.get('user_name', '')}（{backup_data.get('user_id', '')}）")
-                    st.write(f"學習紀錄：{len(backup_data.get('progress', []))} 筆")
-                    st.write(f"測驗紀錄：{len(backup_data.get('quiz_log', []))} 筆")
-                    st.write(f"錯題本快照：{len(backup_data.get('error_notebook', []))} 筆")
+                    st.write(f"學習狀態 progress：{len(backup_data.get('progress', []))} 筆")
+                    st.write(f"測驗紀錄 quiz_log：{len(backup_data.get('quiz_log', []))} 筆")
+                    st.write(f"錯題本快照 error_notebook：{len(backup_data.get('error_notebook', []))} 筆")
+                    st.write(f"記憶曲線歷程 memory_log：{len(backup_data.get('memory_log', []))} 筆")
 
                     confirm_cloud_restore = st.checkbox(
                         f"確認用 Google Sheets 備份覆蓋{user_name}目前紀錄",
@@ -442,7 +446,7 @@ def render_sidebar_filters(merged_df: pd.DataFrame) -> dict:
 
     mode = st.sidebar.radio(
         "學習模式",
-        ["全部單字", "今日複習", "未學單字", "學習中", "已掌握"],
+        ["全部單字", "今日複習", "忘記了", "不熟", "認識", "很熟"],
         index=0
     )
 
@@ -487,22 +491,19 @@ def render_sidebar_stats(merged_df: pd.DataFrame, user_name: str):
     today_str = date.today().isoformat()
 
     total_words = len(merged_df)
-    not_started = len(merged_df[merged_df["status"].astype(str).isin(["", "未學"])])
-    learning = len(merged_df[merged_df["status"].astype(str).isin(["學習中", "熟悉"])])
-    mastered = len(merged_df[merged_df["status"].astype(str) == "已掌握"])
-    due_today = len(
-        merged_df[
-            (merged_df["next_review"].astype(str) == "") |
-            (merged_df["next_review"].astype(str) <= today_str)
-        ]
-    )
+    forgot = len(merged_df[merged_df["status"].astype(str) == "忘記了"])
+    hard = len(merged_df[merged_df["status"].astype(str) == "不熟"])
+    known = len(merged_df[merged_df["status"].astype(str) == "認識"])
+    mastered = len(merged_df[merged_df["status"].astype(str) == "很熟"])
 
-    st.sidebar.write(f"使用者：**{user_name}**")
-    st.sidebar.write(f"全部單字：**{total_words}**")
+    st.sidebar.divider()
+    st.sidebar.markdown("### 📊 學習統計")
+    st.sidebar.write(f"這位使用者目前共有 **{len(merged_df)}** 筆學習紀錄。")
     st.sidebar.write(f"今日可複習：**{due_today}**")
-    st.sidebar.write(f"未學：**{not_started}**")
-    st.sidebar.write(f"學習中 / 熟悉：**{learning}**")
-    st.sidebar.write(f"已掌握：**{mastered}")
+    st.sidebar.write(f"忘記了：**{forgot}**")
+    st.sidebar.write(f"不熟：**{hard}**")
+    st.sidebar.write(f"認識：**{known}**")
+    st.sidebar.write(f"很熟：**{mastered}**")
 
 
 def render_backup_section(user_id: str, user_name: str):
@@ -577,7 +578,7 @@ def render_backup_section(user_id: str, user_name: str):
 
         with tab_upload_user:
             st.subheader("上傳單一使用者完整備份")
-            st.info("完整備份 JSON 會同時覆蓋目前使用者的 progress 學習紀錄與 quiz_log 測驗紀錄。")
+            st.info("完整備份 JSON 會同時覆蓋目前使用者的 progress 學習狀態、quiz_log 測驗紀錄與 memory_log 記憶曲線歷程。")
 
             uploaded_combined_json = st.file_uploader(
                 f"上傳 {user_name} 的完整備份 JSON",
@@ -597,9 +598,10 @@ def render_backup_section(user_id: str, user_name: str):
                     st.write("完整備份資訊：")
                     st.write(f"匯出時間：{backup_data.get('exported_at', '')}")
                     st.write(f"原使用者：{backup_data.get('user_name', '')}（{backup_data.get('user_id', '')}）")
-                    st.write(f"學習紀錄：{len(backup_data.get('progress', []))} 筆")
-                    st.write(f"測驗紀錄：{len(backup_data.get('quiz_log', []))} 筆")
-                    st.write(f"錯題本快照：{len(backup_data.get('error_notebook', []))} 筆")
+                    st.write(f"學習狀態 progress：{len(backup_data.get('progress', []))} 筆")
+                    st.write(f"測驗紀錄 quiz_log：{len(backup_data.get('quiz_log', []))} 筆")
+                    st.write(f"錯題本快照 error_notebook：{len(backup_data.get('error_notebook', []))} 筆")
+                    st.write(f"記憶曲線歷程 memory_log：{len(backup_data.get('memory_log', []))} 筆")
 
                     if st.button("開始覆蓋匯入完整備份", disabled=not confirm_combined_import, key=f"start_combined_import_{user_id}"):
                         ok, msg = import_user_combined_backup(user_id, backup_data)

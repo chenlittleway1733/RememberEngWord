@@ -16,6 +16,24 @@ import streamlit as st
 from config import DATA_PATH
 from utils import safe_str
 
+LEVELS = ["忘記了", "不熟", "認識", "很熟"]
+STATUS_ALIASES = {
+    "": "忘記了",
+    "未學": "忘記了",
+    "學習中": "不熟",
+    "熟悉": "認識",
+    "已掌握": "很熟",
+    "忘記了": "忘記了",
+    "不熟": "不熟",
+    "認識": "認識",
+    "很熟": "很熟",
+}
+
+
+def normalize_learning_status(status: str) -> str:
+    """將舊版狀態轉成新版四級。"""
+    return STATUS_ALIASES.get(safe_str(status), "忘記了")
+
 
 def make_word_id(row: pd.Series) -> str:
     """
@@ -75,7 +93,7 @@ def merge_words_with_progress(words_df: pd.DataFrame, progress_df: pd.DataFrame)
         if col not in merged_df.columns:
             merged_df[col] = ""
 
-    merged_df["status"] = merged_df["status"].replace("", "未學")
+    merged_df["status"] = merged_df["status"].apply(normalize_learning_status)
     merged_df["mastery"] = merged_df["mastery"].replace("", 0)
     merged_df["review_count"] = merged_df["review_count"].replace("", 0)
     merged_df["correct_count"] = merged_df["correct_count"].replace("", 0)
@@ -129,11 +147,13 @@ def filter_words(df: pd.DataFrame, filter_state: dict, today_str: str) -> pd.Dat
             (filtered_df["next_review"].astype(str) == "") |
             (filtered_df["next_review"].astype(str) <= today_str)
         ]
-    elif mode == "未學單字":
-        filtered_df = filtered_df[filtered_df["status"].astype(str).isin(["", "未學"])]
-    elif mode == "學習中":
-        filtered_df = filtered_df[filtered_df["status"].astype(str).isin(["學習中", "熟悉"])]
-    elif mode == "已掌握":
-        filtered_df = filtered_df[filtered_df["status"].astype(str) == "已掌握"]
+    elif mode in ["忘記了", "未學單字"]:
+        filtered_df = filtered_df[filtered_df["status"].astype(str) == "忘記了"]
+    elif mode == "不熟":
+        filtered_df = filtered_df[filtered_df["status"].astype(str) == "不熟"]
+    elif mode == "認識":
+        filtered_df = filtered_df[filtered_df["status"].astype(str) == "認識"]
+    elif mode in ["很熟", "已掌握"]:
+        filtered_df = filtered_df[filtered_df["status"].astype(str) == "很熟"]
 
     return filtered_df

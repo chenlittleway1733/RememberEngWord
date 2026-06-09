@@ -114,3 +114,23 @@
 - 需要在 Streamlit Secrets 設定：
   GOOGLE_SCRIPT_URL
   GOOGLE_BACKUP_TOKEN
+
+
+更新：等級挑戰版
+- 單字等級改為四級：忘記了、不熟、認識、很熟
+- 單字卡只顯示目前等級，不提供手動改等級按鈕
+- 孩子必須透過測驗挑戰提升單字等級
+- 測驗答錯會降級一級：很熟→認識→不熟→忘記了
+- 測驗連續答對 2 次才升級一級：忘記了→不熟→認識→很熟
+- 很熟的單字仍會低頻出現，不會完全消失
+- 測驗出題依等級加權：忘記了 8、不熟 5、認識 2、很熟 1
+- 新增 memory_log 記憶曲線歷程表
+- 每次測驗造成的等級變化都會記錄到 memory_log
+- 統計報表新增記憶曲線歷程
+- 完整備份 JSON 新增 memory_log
+
+
+更新：快速備份區顯示 memory_log
+- 快速備份區文字改為完整備份包含 progress、quiz_log、error_notebook、memory_log
+- Google Sheets 讀取備份時會顯示記憶曲線歷程 memory_log 筆數
+- 上傳本機完整備份 JSON 時也會顯示 memory_log 筆數

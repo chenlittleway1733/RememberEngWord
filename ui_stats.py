@@ -14,7 +14,7 @@ from datetime import date
 import pandas as pd
 import streamlit as st
 
-from database import load_quiz_log, load_error_summary
+from database import load_quiz_log, load_error_summary, load_memory_log
 from utils import safe_int
 
 
@@ -30,9 +30,10 @@ def render_stats_page(user_id: str, user_name: str, merged_df: pd.DataFrame):
     today_str = date.today().isoformat()
 
     total_words = len(merged_df)
-    not_started = len(merged_df[merged_df["status"].astype(str).isin(["", "未學"])])
-    learning = len(merged_df[merged_df["status"].astype(str).isin(["學習中", "熟悉"])])
-    mastered = len(merged_df[merged_df["status"].astype(str) == "已掌握"])
+    forgot = len(merged_df[merged_df["status"].astype(str) == "忘記了"])
+    hard = len(merged_df[merged_df["status"].astype(str) == "不熟"])
+    known = len(merged_df[merged_df["status"].astype(str) == "認識"])
+    mastered = len(merged_df[merged_df["status"].astype(str) == "很熟"])
     due_today = len(
         merged_df[
             (merged_df["next_review"].astype(str) == "") |
@@ -44,23 +45,24 @@ def render_stats_page(user_id: str, user_name: str, merged_df: pd.DataFrame):
     avg_mastery = round(float(mastery_series.mean()), 1) if total_words else 0
 
     st.markdown("### 學習總覽")
-    c1, c2, c3, c4, c5 = st.columns(5)
+    c1, c2, c3, c4, c5, c6 = st.columns(6)
     c1.metric("全部單字", total_words)
     c2.metric("今日可複習", due_today)
-    c3.metric("未學", not_started)
-    c4.metric("學習中 / 熟悉", learning)
-    c5.metric("已掌握", mastered)
+    c3.metric("忘記了", forgot)
+    c4.metric("不熟", hard)
+    c5.metric("認識", known)
+    c6.metric("很熟", mastered)
 
     st.progress(min(mastered / total_words, 1.0) if total_words else 0)
-    st.caption(f"已掌握比例：{round(mastered / total_words * 100, 1) if total_words else 0}%｜平均熟練度：{avg_mastery}/100")
+    st.caption(f"很熟比例：{round(mastered / total_words * 100, 1) if total_words else 0}%｜平均熟練度：{avg_mastery}/100")
 
     st.divider()
 
     st.markdown("### 學習狀態分布")
     status_df = (
         merged_df["status"]
-        .replace("", "未學")
-        .fillna("未學")
+        .replace("", "忘記了")
+        .fillna("忘記了")
         .value_counts()
         .reset_index()
     )
@@ -142,6 +144,28 @@ def render_stats_page(user_id: str, user_name: str, merged_df: pd.DataFrame):
 
         chart_error = top_error_df[["單字", "錯誤次數"]].set_index("單字")
         st.bar_chart(chart_error)
+
+    st.divider()
+
+    st.markdown("### 記憶曲線歷程")
+    memory_df = load_memory_log(user_id)
+
+    if memory_df.empty:
+        st.info("目前還沒有記憶曲線歷程。")
+    else:
+        mlog = memory_df.head(50).rename(columns={
+            "created_at": "時間",
+            "word": "單字",
+            "source": "來源",
+            "event_type": "事件",
+            "old_status": "原等級",
+            "new_status": "新等級",
+            "change_direction": "變化",
+            "note": "說明",
+        })
+        show_cols = ["時間", "單字", "來源", "事件", "原等級", "新等級", "變化", "說明"]
+        show_cols = [c for c in show_cols if c in mlog.columns]
+        st.dataframe(mlog[show_cols], use_container_width=True, hide_index=True)
 
     st.divider()
 

@@ -67,7 +67,7 @@ def render_quiz_page(merged_df: pd.DataFrame, user_id: str, user_name: str, filt
     with quiz_col2:
         quiz_source = st.selectbox(
             "出題來源",
-            ["目前範圍", "今日複習", "未學單字", "學習中", "錯題本"],
+            ["目前範圍", "今日複習", "忘記了", "不熟", "認識", "很熟", "錯題本"],
             key="quiz_source"
         )
 
@@ -131,10 +131,8 @@ def render_quiz_page(merged_df: pd.DataFrame, user_id: str, user_name: str, filt
             (merged_df["next_review"].astype(str) == "") |
             (merged_df["next_review"].astype(str) <= today_str)
         ].copy()
-    elif quiz_source == "未學單字":
-        quiz_source_df = merged_df[merged_df["status"].astype(str).isin(["", "未學"])].copy()
-    elif quiz_source == "學習中":
-        quiz_source_df = merged_df[merged_df["status"].astype(str).isin(["學習中", "熟悉"])].copy()
+    elif quiz_source in ["忘記了", "不熟", "認識", "很熟"]:
+        quiz_source_df = merged_df[merged_df["status"].astype(str) == quiz_source].copy()
     elif quiz_source == "錯題本":
         error_word_ids = get_error_word_ids(user_id)
         quiz_source_df = merged_df[merged_df["word_id"].astype(str).isin(error_word_ids)].copy()
@@ -277,12 +275,20 @@ def render_quiz_page(merged_df: pd.DataFrame, user_id: str, user_name: str, filt
         )
 
         if is_correct:
-            update_progress(user_id, q_word_row, "good")
+            progress_result = update_progress(user_id, q_word_row, "good", source="quiz")
             st.session_state.quiz_count_correct += 1
-            st.success(f"答對了！正確答案：{correct_answer}")
+
+            if progress_result.get("change_direction") == "up":
+                st.success(f"答對了！正確答案：{correct_answer}\n\n{progress_result.get('note', '')}")
+            else:
+                st.info(f"答對了！正確答案：{correct_answer}\n\n{progress_result.get('note', '')}")
+
         else:
-            update_progress(user_id, q_word_row, "forgot")
-            st.error(f"答錯了。你的答案：{user_answer}；正確答案：{correct_answer}")
+            progress_result = update_progress(user_id, q_word_row, "forgot", source="quiz")
+            if progress_result.get("change_direction") == "down":
+                st.warning(f"答錯了。你的答案：{user_answer}；正確答案：{correct_answer}\n\n{progress_result.get('note', '')}")
+            else:
+                st.error(f"答錯了。你的答案：{user_answer}；正確答案：{correct_answer}\n\n{progress_result.get('note', '')}")
 
         st.session_state.quiz_count_done += 1
         st.session_state.quiz_answered = True

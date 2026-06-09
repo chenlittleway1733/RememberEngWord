@@ -19,6 +19,60 @@ import pandas as pd
 from config import DB_PATH, USERS
 from utils import safe_str, safe_int
 
+# ============================================================
+# 單字等級挑戰規則
+# ============================================================
+LEVELS = ["忘記了", "不熟", "認識", "很熟"]
+
+# 舊版狀態轉換成新版四級
+STATUS_ALIASES = {
+    "": "忘記了",
+    "未學": "忘記了",
+    "學習中": "不熟",
+    "熟悉": "認識",
+    "已掌握": "很熟",
+    "忘記了": "忘記了",
+    "不熟": "不熟",
+    "認識": "認識",
+    "很熟": "很熟",
+}
+
+LEVEL_MASTERY = {
+    "忘記了": 0,
+    "不熟": 35,
+    "認識": 70,
+    "很熟": 100,
+}
+
+LEVEL_NEXT_DAYS = {
+    "忘記了": 1,
+    "不熟": 2,
+    "認識": 5,
+    "很熟": 14,
+}
+
+
+def normalize_status(status: str) -> str:
+    """把舊版或空白狀態轉成新版四級狀態。"""
+    return STATUS_ALIASES.get(safe_str(status), "忘記了")
+
+
+def level_index(status: str) -> int:
+    """取得等級索引。"""
+    return LEVELS.index(normalize_status(status))
+
+
+def upgrade_status(status: str) -> str:
+    """升級一級；很熟維持很熟。"""
+    idx = min(level_index(status) + 1, len(LEVELS) - 1)
+    return LEVELS[idx]
+
+
+def downgrade_status(status: str) -> str:
+    """降級一級；忘記了維持忘記了。"""
+    idx = max(level_index(status) - 1, 0)
+    return LEVELS[idx]
+
 
 def get_conn():
     """連線到 SQLite 資料庫。"""
@@ -106,6 +160,9 @@ def init_db():
     conn.commit()
     conn.close()
 
+    ensure_memory_log_table()
+    normalize_existing_progress_statuses()
+
 
 def create_progress_table(cur):
     """建立新版 progress 資料表。"""
@@ -118,7 +175,7 @@ def create_progress_table(cur):
             grade TEXT,
             semester TEXT,
             lesson TEXT,
-            status TEXT DEFAULT '未學',
+            status TEXT DEFAULT '忘記了',
             mastery INTEGER DEFAULT 0,
             review_count INTEGER DEFAULT 0,
             correct_count INTEGER DEFAULT 0,
@@ -157,6 +214,64 @@ def ensure_quiz_log_table():
     conn.close()
 
 
+def ensure_memory_log_table():
+    """
+    建立 memory_log 記憶曲線歷程表。
+
+    這張表會記錄每次測驗造成的單字等級變化：
+    - 答錯：降級一級
+    - 連續答對 2 次：升級一級
+    - 很熟仍會低頻出現，不會完全消失
+    """
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS memory_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id TEXT NOT NULL,
+            word_id TEXT NOT NULL,
+            word TEXT,
+            source TEXT,
+            event_type TEXT,
+            is_correct INTEGER,
+            old_status TEXT,
+            new_status TEXT,
+            old_streak_correct INTEGER,
+            new_streak_correct INTEGER,
+            status_changed INTEGER,
+            change_direction TEXT,
+            note TEXT,
+            created_at TEXT
+        )
+        """
+    )
+    conn.commit()
+    conn.close()
+
+
+def normalize_existing_progress_statuses():
+    """將既有 progress 的舊版狀態轉成新版四級狀態。"""
+    conn = get_conn()
+    cur = conn.cursor()
+
+    cur.execute(
+        """
+        UPDATE progress
+        SET status = CASE
+            WHEN status IS NULL OR status = '' OR status = '未學' THEN '忘記了'
+            WHEN status = '學習中' THEN '不熟'
+            WHEN status = '熟悉' THEN '認識'
+            WHEN status = '已掌握' THEN '很熟'
+            ELSE status
+        END
+        """
+    )
+
+    conn.commit()
+    conn.close()
+
+
 def ensure_progress_for_words(df: pd.DataFrame):
     """確保每位使用者、每個單字都有一筆 progress 紀錄。"""
     conn = get_conn()
@@ -171,7 +286,7 @@ def ensure_progress_for_words(df: pd.DataFrame):
                 (user_id, word_id, word, grade, semester, lesson, status, mastery,
                  review_count, correct_count, wrong_count, streak_correct,
                  last_review, next_review, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, '未學', 0, 0, 0, 0, 0, NULL, NULL, ?)
+                VALUES (?, ?, ?, ?, ?, ?, '忘記了', 0, 0, 0, 0, 0, NULL, NULL, ?)
                 """,
                 (
                     user_id,
@@ -232,69 +347,124 @@ def get_progress(user_id: str, word_id: str) -> dict:
 
 
 def calculate_review_result(level: str, current_progress: dict) -> dict:
-    """根據熟悉度按鈕計算新紀錄。"""
+    """
+    根據測驗結果計算新等級。
+
+    等級規則：
+    1. 等級固定為：忘記了 → 不熟 → 認識 → 很熟
+    2. 答錯：立刻降級一級
+    3. 答對：連續答對 2 次才升級一級
+    4. 很熟仍會出題，只是低頻出現
+    """
     today = date.today()
 
-    mastery = safe_int(current_progress.get("mastery"), 0)
-    review_count = safe_int(current_progress.get("review_count"), 0)
+    old_status = normalize_status(current_progress.get("status", "忘記了"))
+    review_count = safe_int(current_progress.get("review_count"), 0) + 1
     correct_count = safe_int(current_progress.get("correct_count"), 0)
     wrong_count = safe_int(current_progress.get("wrong_count"), 0)
-    streak_correct = safe_int(current_progress.get("streak_correct"), 0)
+    old_streak_correct = safe_int(current_progress.get("streak_correct"), 0)
+    new_streak_correct = old_streak_correct
 
-    review_count += 1
+    is_correct = level not in ["forgot", "wrong", "incorrect"]
 
-    if level == "forgot":
-        mastery = max(0, mastery - 20)
-        wrong_count += 1
-        streak_correct = 0
-        next_days = 1
-        status = "學習中"
-    elif level == "hard":
-        mastery = min(100, mastery + 5)
+    change_direction = "none"
+    event_type = "測驗答對" if is_correct else "測驗答錯"
+
+    if is_correct:
         correct_count += 1
-        streak_correct += 1
-        next_days = 2
-        status = "學習中"
-    elif level == "good":
-        mastery = min(100, mastery + 15)
-        correct_count += 1
-        streak_correct += 1
-        next_days = 4
-        status = "熟悉"
-    elif level == "easy":
-        mastery = min(100, mastery + 25)
-        correct_count += 1
-        streak_correct += 1
-        if streak_correct >= 5:
-            next_days = 30
-            status = "已掌握"
-        elif streak_correct >= 3:
-            next_days = 14
-            status = "熟悉"
+        new_streak_correct = old_streak_correct + 1
+
+        if new_streak_correct >= 2:
+            new_status = upgrade_status(old_status)
+            new_streak_correct = 0
+
+            if new_status != old_status:
+                change_direction = "up"
+                note = f"🎉 連續答對 2 次，等級由「{old_status}」升為「{new_status}」。"
+            else:
+                note = f"✅ 已經是「{old_status}」，答對後維持最高等級。"
         else:
-            next_days = 7
-            status = "熟悉"
-    else:
-        next_days = 1
-        status = "學習中"
+            new_status = old_status
+            note = f"✅ 答對！連續答對 {new_streak_correct}/2 次，再答對一次可升級。"
 
+    else:
+        wrong_count += 1
+        new_streak_correct = 0
+        new_status = downgrade_status(old_status)
+
+        if new_status != old_status:
+            change_direction = "down"
+            note = f"⚠️ 答錯，等級由「{old_status}」降為「{new_status}」。"
+        else:
+            note = f"⚠️ 答錯，目前已是「{old_status}」，維持最低等級。"
+
+    status_changed = 1 if new_status != old_status else 0
+    next_days = LEVEL_NEXT_DAYS.get(new_status, 1)
     next_review = today + timedelta(days=next_days)
 
     return {
-        "status": status,
-        "mastery": mastery,
+        "old_status": old_status,
+        "status": new_status,
+        "mastery": LEVEL_MASTERY.get(new_status, 0),
         "review_count": review_count,
         "correct_count": correct_count,
         "wrong_count": wrong_count,
-        "streak_correct": streak_correct,
+        "old_streak_correct": old_streak_correct,
+        "streak_correct": new_streak_correct,
         "last_review": today.isoformat(),
         "next_review": next_review.isoformat(),
         "updated_at": datetime.now().isoformat(timespec="seconds"),
+        "is_correct": 1 if is_correct else 0,
+        "event_type": event_type,
+        "status_changed": status_changed,
+        "change_direction": change_direction,
+        "note": note,
     }
 
 
-def update_progress(user_id: str, word_row: pd.Series, level: str):
-    """更新學習紀錄。"""
+def log_memory_event(user_id: str, word_row: pd.Series, result: dict, source: str = "quiz"):
+    """寫入一次單字記憶曲線歷程。"""
+    ensure_memory_log_table()
+
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        INSERT INTO memory_log
+        (user_id, word_id, word, source, event_type, is_correct,
+         old_status, new_status, old_streak_correct, new_streak_correct,
+         status_changed, change_direction, note, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            user_id,
+            safe_str(word_row.get("word_id", "")),
+            safe_str(word_row.get("word", "")),
+            source,
+            result.get("event_type", ""),
+            safe_int(result.get("is_correct", 0)),
+            result.get("old_status", ""),
+            result.get("status", ""),
+            safe_int(result.get("old_streak_correct", 0)),
+            safe_int(result.get("streak_correct", 0)),
+            safe_int(result.get("status_changed", 0)),
+            result.get("change_direction", "none"),
+            result.get("note", ""),
+            result.get("updated_at", datetime.now().isoformat(timespec="seconds")),
+        )
+    )
+    conn.commit()
+    conn.close()
+
+
+def update_progress(user_id: str, word_row: pd.Series, level: str, source: str = "quiz") -> dict:
+    """
+    更新學習紀錄，並回傳本次升級 / 降級訊息。
+
+    level:
+    - good：測驗答對
+    - forgot：測驗答錯
+    """
     word_id = safe_str(word_row["word_id"])
     current_progress = get_progress(user_id, word_id)
     result = calculate_review_result(level, current_progress)
@@ -341,6 +511,9 @@ def update_progress(user_id: str, word_row: pd.Series, level: str):
     conn.commit()
     conn.close()
 
+    log_memory_event(user_id, word_row, result, source=source)
+
+    return result
 
 def log_quiz_result(user_id: str, word_row: pd.Series, quiz_type: str, question: str,
                     correct_answer: str, user_answer: str, is_correct: bool):
@@ -503,6 +676,24 @@ def get_error_word_ids(user_id: str) -> list[str]:
     return error_df["word_id"].dropna().astype(str).unique().tolist()
 
 
+
+def load_memory_log(user_id: str | None = None) -> pd.DataFrame:
+    """讀取記憶曲線歷程紀錄。"""
+    ensure_memory_log_table()
+
+    conn = get_conn()
+    if user_id:
+        df = pd.read_sql_query(
+            "SELECT * FROM memory_log WHERE user_id = ? ORDER BY id DESC",
+            conn,
+            params=(user_id,)
+        )
+    else:
+        df = pd.read_sql_query("SELECT * FROM memory_log ORDER BY id DESC", conn)
+    conn.close()
+    return df
+
+
 def import_user_quiz_log_from_csv(user_id: str, csv_df: pd.DataFrame) -> tuple[bool, str]:
     """
     匯入單一使用者的測驗紀錄 CSV。
@@ -577,16 +768,18 @@ def export_user_combined_backup(user_id: str, user_name: str) -> bytes:
     progress_df = load_progress(user_id)
     quiz_log_df = load_quiz_log(user_id)
     error_df = load_error_summary(user_id)
+    memory_df = load_memory_log(user_id)
 
     backup_data = {
         "backup_type": "vocab_app_user_backup",
-        "version": "1.1",
+        "version": "1.2",
         "exported_at": datetime.now().isoformat(timespec="seconds"),
         "user_id": user_id,
         "user_name": user_name,
         "progress": progress_df.to_dict(orient="records"),
         "quiz_log": quiz_log_df.to_dict(orient="records"),
         "error_notebook": error_df.to_dict(orient="records"),
+        "memory_log": memory_df.to_dict(orient="records"),
     }
 
     return json.dumps(backup_data, ensure_ascii=False, indent=2).encode("utf-8")
@@ -608,6 +801,7 @@ def import_user_combined_backup(user_id: str, backup_data: dict) -> tuple[bool, 
     progress_records = backup_data.get("progress", [])
     quiz_log_records = backup_data.get("quiz_log", [])
     error_records = backup_data.get("error_notebook", [])
+    memory_records = backup_data.get("memory_log", [])
 
     if not isinstance(progress_records, list):
         return False, "JSON 中的 progress 格式不正確。"
@@ -644,10 +838,52 @@ def import_user_combined_backup(user_id: str, backup_data: dict) -> tuple[bool, 
         conn.commit()
         conn.close()
 
+    # 匯入 memory_log。舊備份沒有 memory_log 時，只清空目前 memory_log，避免歷程混用。
+    ensure_memory_log_table()
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("DELETE FROM memory_log WHERE user_id = ?", (user_id,))
+
+    if isinstance(memory_records, list):
+        for row in memory_records:
+            word_id = safe_str(row.get("word_id", ""))
+            if not word_id:
+                continue
+
+            cur.execute(
+                """
+                INSERT INTO memory_log
+                (user_id, word_id, word, source, event_type, is_correct,
+                 old_status, new_status, old_streak_correct, new_streak_correct,
+                 status_changed, change_direction, note, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    user_id,
+                    word_id,
+                    safe_str(row.get("word", "")),
+                    safe_str(row.get("source", "")),
+                    safe_str(row.get("event_type", "")),
+                    safe_int(row.get("is_correct", 0)),
+                    normalize_status(row.get("old_status", "忘記了")),
+                    normalize_status(row.get("new_status", row.get("status", "忘記了"))),
+                    safe_int(row.get("old_streak_correct", 0)),
+                    safe_int(row.get("new_streak_correct", 0)),
+                    safe_int(row.get("status_changed", 0)),
+                    safe_str(row.get("change_direction", "")),
+                    safe_str(row.get("note", "")),
+                    safe_str(row.get("created_at", "")) or datetime.now().isoformat(timespec="seconds"),
+                )
+            )
+
+    conn.commit()
+    conn.close()
+
     return True, (
         f"已完成單一使用者完整還原："
         f"學習紀錄 {len(progress_records)} 筆，"
-        f"測驗紀錄 {len(quiz_log_records)} 筆。"
+        f"測驗紀錄 {len(quiz_log_records)} 筆，"
+        f"記憶曲線歷程 {len(memory_records) if isinstance(memory_records, list) else 0} 筆。"
         f"錯題本會由測驗紀錄自動重建；備份檔內含錯題本快照 {len(error_records)} 筆。"
     )
 
@@ -690,7 +926,7 @@ def import_user_progress_from_csv(user_id: str, csv_df: pd.DataFrame, import_mod
                 safe_str(row.get("grade", "")),
                 safe_str(row.get("semester", "")),
                 safe_str(row.get("lesson", "")),
-                safe_str(row.get("status", "未學")) or "未學",
+                normalize_status(row.get("status", "忘記了")),
                 safe_int(row.get("mastery", 0)),
                 safe_int(row.get("review_count", 0)),
                 safe_int(row.get("correct_count", 0)),

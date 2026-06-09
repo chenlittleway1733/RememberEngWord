@@ -26,6 +26,7 @@ from database import (
     init_db,
     ensure_progress_for_words,
     ensure_quiz_log_table,
+    ensure_memory_log_table,
     load_users,
     load_progress,
 )
@@ -76,6 +77,7 @@ if words_df.empty:
 
 init_db()
 ensure_quiz_log_table()
+ensure_memory_log_table()
 ensure_progress_for_words(words_df)
 
 
@@ -118,7 +120,7 @@ render_sidebar_stats(
 
 st.markdown('<div class="main-title">📘 國中英文單字複習</div>', unsafe_allow_html=True)
 st.markdown(
-    '<div class="small-caption">進階版：單字卡 + 測驗 + 錯題本 + 統計報表 + 聽力測驗</div>',
+    '<div class="small-caption">等級挑戰版：單字卡 + 測驗升級 + 錯題本 + 統計報表 + 聽力測驗</div>',
     unsafe_allow_html=True
 )
 
@@ -129,13 +131,17 @@ due_today = len(
         (merged_df["next_review"].astype(str) <= today_str)
     ]
 )
-learning = len(merged_df[merged_df["status"].astype(str).isin(["學習中", "熟悉"])])
-mastered = len(merged_df[merged_df["status"].astype(str) == "已掌握"])
+forgot_count = len(merged_df[merged_df["status"].astype(str) == "忘記了"])
+hard_count = len(merged_df[merged_df["status"].astype(str) == "不熟"])
+known_count = len(merged_df[merged_df["status"].astype(str) == "認識"])
+mastered = len(merged_df[merged_df["status"].astype(str) == "很熟"])
 
-metric_col1, metric_col2, metric_col3 = st.columns(3)
+metric_col1, metric_col2, metric_col3, metric_col4, metric_col5 = st.columns(5)
 metric_col1.metric("今日可複習", due_today)
-metric_col2.metric("學習中", learning)
-metric_col3.metric("已掌握", mastered)
+metric_col2.metric("忘記了", forgot_count)
+metric_col3.metric("不熟", hard_count)
+metric_col4.metric("認識", known_count)
+metric_col5.metric("很熟", mastered)
 
 
 # ============================================================

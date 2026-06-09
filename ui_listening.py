@@ -20,6 +20,7 @@ from utils import safe_str
 from data import filter_words
 from database import update_progress, log_quiz_result, load_quiz_log, get_error_word_ids
 from audio import get_audio_file, autoplay_audio, audio_button
+from quiz import weighted_sample_word
 
 
 def reset_listening_session():
@@ -82,7 +83,7 @@ def prepare_new_listening_question(source_df: pd.DataFrame):
     if pool.empty:
         return {}
 
-    row = pool.sample(1).iloc[0]
+    row = weighted_sample_word(pool)
     options = make_listening_options(row, pool)
 
     # question_id 用來讓每一題的自動播放狀態獨立，
@@ -112,7 +113,7 @@ def render_listening_page(merged_df: pd.DataFrame, user_id: str, user_name: str,
     with col1:
         listening_source = st.selectbox(
             "出題來源",
-            ["目前範圍", "今日複習", "未學單字", "學習中", "錯題本"],
+            ["目前範圍", "今日複習", "忘記了", "不熟", "認識", "很熟", "錯題本"],
             key="listening_source"
         )
 
@@ -176,10 +177,8 @@ def render_listening_page(merged_df: pd.DataFrame, user_id: str, user_name: str,
             (merged_df["next_review"].astype(str) == "") |
             (merged_df["next_review"].astype(str) <= today_str)
         ].copy()
-    elif listening_source == "未學單字":
-        source_df = merged_df[merged_df["status"].astype(str).isin(["", "未學"])].copy()
-    elif listening_source == "學習中":
-        source_df = merged_df[merged_df["status"].astype(str).isin(["學習中", "熟悉"])].copy()
+    elif listening_source in ["忘記了", "不熟", "認識", "很熟"]:
+        source_df = merged_df[merged_df["status"].astype(str) == listening_source].copy()
     elif listening_source == "錯題本":
         error_word_ids = get_error_word_ids(user_id)
         source_df = merged_df[merged_df["word_id"].astype(str).isin(error_word_ids)].copy()
@@ -286,12 +285,20 @@ def render_listening_page(merged_df: pd.DataFrame, user_id: str, user_name: str,
         )
 
         if is_correct:
-            update_progress(user_id, row, "good")
+            progress_result = update_progress(user_id, row, "good", source="listening")
             st.session_state.listening_count_correct += 1
-            st.success(f"答對了！正確答案：{correct_answer}")
+
+            if progress_result.get("change_direction") == "up":
+                st.success(f"答對了！正確答案：{correct_answer}\n\n{progress_result.get('note', '')}")
+            else:
+                st.info(f"答對了！正確答案：{correct_answer}\n\n{progress_result.get('note', '')}")
+
         else:
-            update_progress(user_id, row, "forgot")
-            st.error(f"答錯了。你選的是：{user_answer}；正確答案：{correct_answer}")
+            progress_result = update_progress(user_id, row, "forgot", source="listening")
+            if progress_result.get("change_direction") == "down":
+                st.warning(f"答錯了。你選的是：{user_answer}；正確答案：{correct_answer}\n\n{progress_result.get('note', '')}")
+            else:
+                st.error(f"答錯了。你選的是：{user_answer}；正確答案：{correct_answer}\n\n{progress_result.get('note', '')}")
 
         st.session_state.listening_count_done += 1
         st.session_state.listening_answered = True

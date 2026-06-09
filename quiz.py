@@ -17,6 +17,35 @@ import pandas as pd
 
 from utils import safe_str
 
+STATUS_WEIGHTS = {
+    "忘記了": 8,
+    "不熟": 5,
+    "認識": 2,
+    "很熟": 1,
+    "未學": 8,
+    "學習中": 5,
+    "熟悉": 2,
+    "已掌握": 1,
+    "": 8,
+}
+
+
+def get_status_weight(status: str) -> int:
+    """依單字等級決定出題權重。"""
+    return STATUS_WEIGHTS.get(safe_str(status), 8)
+
+
+def weighted_sample_word(pool: pd.DataFrame) -> pd.Series:
+    """
+    依等級加權抽題：
+    忘記了 8、不熟 5、認識 2、很熟 1。
+    """
+    if pool.empty:
+        return pd.Series(dtype=object)
+
+    weights = pool["status"].apply(get_status_weight) if "status" in pool.columns else None
+    return pool.sample(1, weights=weights).iloc[0]
+
 
 def make_choice_options(correct_answer: str, distractors: list[str]) -> list[str]:
     """產生選擇題選項，包含正確答案與誘答，並隨機排序。"""
@@ -207,7 +236,7 @@ def prepare_new_quiz_question(source_df: pd.DataFrame, quiz_type: str):
     if pool.empty:
         return {}
 
-    word_row = pool.sample(1).iloc[0]
+    word_row = weighted_sample_word(pool)
     question = build_quiz_question(word_row, quiz_type)
 
     if not question:

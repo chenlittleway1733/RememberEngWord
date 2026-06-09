@@ -11,7 +11,7 @@ import streamlit as st
 
 from utils import safe_str
 from data import filter_words
-from database import get_progress, update_progress
+from database import get_progress
 from audio import get_audio_file, autoplay_audio, audio_button
 from ui_common import show_info_table, show_table_in_card, open_card, render_backup_section
 
@@ -221,34 +221,22 @@ def render_vocab_card_page(merged_df: pd.DataFrame, user_id: str, user_name: str
         ]
         show_table_in_card("學習狀態", progress_rows, icon="📈", css_class="soft-card")
 
-        st.markdown('<div class="section-title">我對這個字的熟悉度</div>', unsafe_allow_html=True)
-        b1, b2 = st.columns(2)
-        b3, b4 = st.columns(2)
+        current_level = safe_str(current_progress.get("status", "忘記了")) or "忘記了"
+        streak_now = safe_str(current_progress.get("streak_correct", 0))
 
-        with b1:
-            if st.button("😵 忘記了", use_container_width=True, key=f"forgot_{user_id}_{current_word_id}"):
-                update_progress(user_id, current_word, "forgot")
-                st.success("已記錄：忘記了。明天會再複習。")
-                st.rerun()
-
-        with b2:
-            if st.button("😐 不熟", use_container_width=True, key=f"hard_{user_id}_{current_word_id}"):
-                update_progress(user_id, current_word, "hard")
-                st.success("已記錄：不熟。2 天後會再複習。")
-                st.rerun()
-
-        with b3:
-            if st.button("🙂 認識", use_container_width=True, key=f"good_{user_id}_{current_word_id}"):
-                update_progress(user_id, current_word, "good")
-                st.success("已記錄：認識。4 天後會再複習。")
-                st.rerun()
-
-        with b4:
-            if st.button("😄 很熟", use_container_width=True, key=f"easy_{user_id}_{current_word_id}"):
-                update_progress(user_id, current_word, "easy")
-                st.success("已記錄：很熟。會延後複習。")
-                st.rerun()
-
+        st.markdown('<div class="section-title">單字等級挑戰</div>', unsafe_allow_html=True)
+        show_table_in_card(
+            "目前等級",
+            [
+                ("等級", current_level),
+                ("升級方式", "到測驗模式挑戰，連續答對 2 次可升級 1 級"),
+                ("降級規則", "測驗答錯會降級 1 級"),
+                ("連續答對", f"{streak_now} / 2"),
+                ("提醒", "很熟的單字仍會低頻出現，不會完全消失"),
+            ],
+            icon="🏅",
+            css_class="soft-card-green"
+        )
         st.divider()
         nav1, nav2, nav3 = st.columns([1, 1.2, 1])
 
