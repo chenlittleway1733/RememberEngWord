@@ -101,3 +101,16 @@
 - 每個例句都有「顯示中文 / 隱藏中文」按鈕
 - 按下後才顯示該句中文翻譯
 - 保留例句發音按鈕
+
+
+更新：Google Sheets 雲端備份 / 還原
+- 新增 google_backup.py
+- 快速備份區新增 Google Sheets 雲端備份
+- 可將目前使用者完整備份 JSON 上傳到 Google Sheets
+- 可從 Google Sheets 讀取完整備份 JSON 並還原
+- Google Sheets 讀取失敗時，仍可用本機完整備份 JSON 還原
+- requirements.txt 新增 requests
+- 新增 google_apps_script_備份API範本.txt
+- 需要在 Streamlit Secrets 設定：
+  GOOGLE_SCRIPT_URL
+  GOOGLE_BACKUP_TOKEN

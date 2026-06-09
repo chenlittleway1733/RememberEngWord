@@ -1,0 +1,137 @@
+請在 Google Sheets → 擴充功能 → Apps Script 中貼上以下程式。
+記得把 TOKEN 改成你自己的密碼，並與 Streamlit Secrets 的 GOOGLE_BACKUP_TOKEN 相同。
+
+const SHEET_NAME = "user_backups";
+const TOKEN = "請改成你自己的安全token";
+
+function doPost(e) {
+  try {
+    const data = JSON.parse(e.postData.contents);
+
+    if (data.token !== TOKEN) {
+      return jsonResponse({
+        ok: false,
+        message: "token 錯誤，拒絕寫入"
+      });
+    }
+
+    const action = data.action;
+
+    if (action === "save_backup") {
+      return saveBackup(data);
+    }
+
+    if (action === "load_backup") {
+      return loadBackup(data);
+    }
+
+    return jsonResponse({
+      ok: false,
+      message: "未知的 action"
+    });
+
+  } catch (err) {
+    return jsonResponse({
+      ok: false,
+      message: "Apps Script 錯誤：" + err.message
+    });
+  }
+}
+
+function saveBackup(data) {
+  const userId = data.user_id;
+  const userName = data.user_name;
+  const backupJson = data.backup_json;
+
+  if (!userId || !backupJson) {
+    return jsonResponse({
+      ok: false,
+      message: "缺少 user_id 或 backup_json"
+    });
+  }
+
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const sheet = getOrCreateSheet(ss, SHEET_NAME);
+  ensureHeader(sheet);
+
+  const values = sheet.getDataRange().getValues();
+  let targetRow = -1;
+
+  for (let i = 1; i < values.length; i++) {
+    if (values[i][0] === userId) {
+      targetRow = i + 1;
+      break;
+    }
+  }
+
+  const now = new Date();
+
+  if (targetRow === -1) {
+    sheet.appendRow([userId, userName || "", backupJson, now]);
+  } else {
+    sheet.getRange(targetRow, 1, 1, 4).setValues([[userId, userName || "", backupJson, now]]);
+  }
+
+  return jsonResponse({
+    ok: true,
+    message: "已儲存備份到 Google Sheets",
+    user_id: userId,
+    updated_at: now.toISOString()
+  });
+}
+
+function loadBackup(data) {
+  const userId = data.user_id;
+
+  if (!userId) {
+    return jsonResponse({
+      ok: false,
+      message: "缺少 user_id"
+    });
+  }
+
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const sheet = getOrCreateSheet(ss, SHEET_NAME);
+  ensureHeader(sheet);
+
+  const values = sheet.getDataRange().getValues();
+
+  for (let i = 1; i < values.length; i++) {
+    if (values[i][0] === userId) {
+      return jsonResponse({
+        ok: true,
+        message: "已讀取備份",
+        user_id: values[i][0],
+        user_name: values[i][1],
+        backup_json: values[i][2],
+        updated_at: values[i][3]
+      });
+    }
+  }
+
+  return jsonResponse({
+    ok: false,
+    message: "找不到此使用者的雲端備份：" + userId
+  });
+}
+
+function getOrCreateSheet(ss, sheetName) {
+  let sheet = ss.getSheetByName(sheetName);
+  if (!sheet) {
+    sheet = ss.insertSheet(sheetName);
+  }
+  return sheet;
+}
+
+function ensureHeader(sheet) {
+  const firstRow = sheet.getRange(1, 1, 1, 4).getValues()[0];
+  if (firstRow[0] !== "user_id") {
+    sheet.getRange(1, 1, 1, 4).setValues([["user_id", "user_name", "backup_json", "updated_at"]]);
+  }
+}
+
+function jsonResponse(obj) {
+  return ContentService
+    .createTextOutput(JSON.stringify(obj))
+    .setMimeType(ContentService.MimeType.JSON);
+}

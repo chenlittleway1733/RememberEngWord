@@ -19,6 +19,11 @@ from database import (
     import_user_combined_backup,
     restore_full_db,
 )
+from google_backup import (
+    is_google_backup_configured,
+    save_user_backup_to_google,
+    load_user_backup_from_google,
+)
 
 
 def apply_global_styles():
@@ -229,6 +234,86 @@ def render_sidebar_quick_backup(user_id: str, user_name: str):
 
                 except Exception as e:
                     st.error(f"讀取完整備份 JSON 失敗：{e}")
+
+
+        # ----------------------------------------------------
+        # Google Sheets 雲端備份 / 還原
+        # ----------------------------------------------------
+        with st.sidebar.expander("☁️ Google Sheets 雲端備份"):
+            if not is_google_backup_configured():
+                st.warning("尚未設定 Google Sheets 雲端備份。請先在 Streamlit Secrets 設定 GOOGLE_SCRIPT_URL 與 GOOGLE_BACKUP_TOKEN。")
+            else:
+                st.caption("可將目前使用者完整備份存到 Google Sheets，也可從 Google Sheets 讀回還原。")
+
+                if st.button(
+                    f"☁️ 上傳{user_name}完整備份到 Google Sheets",
+                    key=f"sidebar_google_upload_{user_id}",
+                    use_container_width=True
+                ):
+                    try:
+                        backup_bytes = export_user_combined_backup(user_id, user_name)
+                        backup_text = backup_bytes.decode("utf-8")
+
+                        ok, msg, _ = save_user_backup_to_google(
+                            user_id=user_id,
+                            user_name=user_name,
+                            backup_json_text=backup_text
+                        )
+
+                        if ok:
+                            st.success(msg)
+                        else:
+                            st.error(msg)
+
+                    except Exception as e:
+                        st.error(f"產生或上傳雲端備份失敗：{e}")
+
+                st.divider()
+
+                if st.button(
+                    f"☁️ 從 Google Sheets 讀取{user_name}備份",
+                    key=f"sidebar_google_load_{user_id}",
+                    use_container_width=True
+                ):
+                    ok, msg, backup_data = load_user_backup_from_google(user_id)
+
+                    if ok:
+                        st.session_state[f"google_backup_preview_{user_id}"] = backup_data
+                        st.success(msg)
+                    else:
+                        st.error(msg)
+                        st.info("如果 Google Sheets 備份有問題，請改用上方「上傳完整備份 JSON」還原本機備份檔。")
+
+                preview_key = f"google_backup_preview_{user_id}"
+                if preview_key in st.session_state:
+                    backup_data = st.session_state[preview_key]
+
+                    st.write("雲端備份資訊：")
+                    st.write(f"匯出時間：{backup_data.get('exported_at', '')}")
+                    st.write(f"原使用者：{backup_data.get('user_name', '')}（{backup_data.get('user_id', '')}）")
+                    st.write(f"學習紀錄：{len(backup_data.get('progress', []))} 筆")
+                    st.write(f"測驗紀錄：{len(backup_data.get('quiz_log', []))} 筆")
+                    st.write(f"錯題本快照：{len(backup_data.get('error_notebook', []))} 筆")
+
+                    confirm_cloud_restore = st.checkbox(
+                        f"確認用 Google Sheets 備份覆蓋{user_name}目前紀錄",
+                        key=f"confirm_google_restore_{user_id}"
+                    )
+
+                    if st.button(
+                        "開始從 Google Sheets 還原",
+                        disabled=not confirm_cloud_restore,
+                        key=f"start_google_restore_{user_id}",
+                        use_container_width=True
+                    ):
+                        ok, msg = import_user_combined_backup(user_id, backup_data)
+
+                        if ok:
+                            st.success(msg)
+                            del st.session_state[preview_key]
+                            st.rerun()
+                        else:
+                            st.error(msg)
 
         # ----------------------------------------------------
         # 進階功能：分開處理 progress 與 quiz_log
